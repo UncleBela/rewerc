@@ -6,7 +6,7 @@
         <textarea name="edit_text" id="edit_text" cols="80" rows="43">%{
 # FIXME Extra trailing new lines get added to the content somehow, should avoid it.
             if(~ $#post_arg_edit_text 0 && test -f $dirdir_file)
-                cat $dirdir_file | escape_html
+                content_read $dirdir_file | escape_html
             if not
                 echo -n $post_arg_edit_text | escape_html
 

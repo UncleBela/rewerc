@@ -14,6 +14,8 @@ use Encode qw(decode);
 
 my $root = abs_path("$FindBin::Bin/../..");
 chdir $root or die $!;
+require "$root/bin/aux/TestAuth.pm";
+TestAuth::setup($root);
 my $dir = tempdir('toc-test-XXXXXX', DIR => "$root/sites", CLEANUP => 1);
 my $file = "$dir/page.md";
 sub write_file {
@@ -158,7 +160,8 @@ subtest 'CGI defaults on; metadata edits turn the outline off immediately' => su
         SERVER_PORT => '8080', REQUEST_URI => '/page', QUERY_STRING => '');
     for my $setting ('true ', 'false') {
         write_file($file, "---\ntitle: Browser only\nlang: hu\ntoc: $setting\n---\n\n# Látható cím\n\nFormula \$x_i\$.\n");
-        my ($out, $err, $status) = command('./bin/werc.cgi');
+        TestAuth::authorize();
+    my ($out, $err, $status) = command('./bin/werc.cgi');
         is $status, 0, 'CGI succeeds';
         is $err, '', 'no CGI errors';
         like $out, qr/<title>Browser only<\/title>/, 'browser title retained';

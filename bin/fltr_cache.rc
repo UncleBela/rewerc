@@ -1,5 +1,10 @@
 #!/bin/rc
 
+fn fltr_cache_read {
+    if(~ $werc_readonly yes) content_read $*
+    if not cat $*
+}
+
 fn fltr_cache {
     a=()
     tmpf=()
@@ -20,7 +25,7 @@ fn fltr_cache {
             f=/dev/null
         }
         if not {
-            score=`{sha1sum $f || exit 1}
+            score=`{fltr_cache_read $f | sha1sum || exit 1}
             score=$score(1)
         }
     }
@@ -30,7 +35,10 @@ fn fltr_cache {
     if(test -s $cachedir/$proc)
         cat $cachedir/$proc
     if not
-        if($proc $a < $f | tee $cachedir/$pid)
+        if({
+            if(~ $f /dev/null || ~ $f $tmpf) cat $f
+            if not fltr_cache_read $f
+        } | $proc $a | tee $cachedir/$pid)
             mv $cachedir/$pid $cachedir/$proc
 
     rm $tmpf $cachedir/$pid >[2]/dev/null &

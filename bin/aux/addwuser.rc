@@ -1,4 +1,7 @@
-#!/usr/bin/env rc
-# Retained command name; never accept or persist account credentials.
-echo 'Account provisioning is unavailable: rewerc publishes read-only content.' >[1=2]
-exit disabled
+#!/bin/sh
+# Legacy command name retained; provisioning is offline and never takes argv passwords.
+set -eu
+[ "$#" -eq 1 ] || { echo 'Usage: addwuser.rc USERNAME (password is prompted privately)' >&2; exit 1; }
+app=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$app"
+exec ./bin/contrib/werc-guard --add-user "$1"

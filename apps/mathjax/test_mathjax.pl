@@ -17,6 +17,8 @@ my $formatter = $ENV{MARKDOWN_FORMATTER} // 'md2html';
 die 'Unknown test formatter' unless $formatter eq 'md2html' || $formatter eq 'markdown.pl';
 my $app = $FindBin::Bin;
 my $root = abs_path("$app/../..");
+require "$root/bin/aux/TestAuth.pm";
+TestAuth::setup($root);
 require "$app/filter.pl";
 chdir $root or die "chdir $root: $!";
 
@@ -216,6 +218,7 @@ subtest 'full werc CGI request' => sub {
     my ($name) = $dir =~ m{/([^/]+)$};
     local %ENV = (%ENV, PLAN9 => '/opt/plan9', REQUEST_METHOD => 'GET',
         SERVER_NAME => "$name", SERVER_PORT => '8080', REQUEST_URI => '/', QUERY_STRING => '');
+    TestAuth::authorize();
     chdir "$root/bin" or die $!;
     my ($out, $err, $status) = command('', './werc.cgi');
     chdir $root or die $!;
@@ -229,6 +232,7 @@ subtest 'full werc CGI request' => sub {
     like $out, qr/\Q\[\frac{1}{2}\]\E/, 'display equation';
     unlike $out, qr/werc-math-token/, 'no unprocessed tokens';
     $ENV{REQUEST_URI} = '/table';
+    TestAuth::authorize();
     chdir "$root/bin" or die $!;
     my ($table, $table_err, $table_status) = command('', './werc.cgi');
     chdir $root or die $!;

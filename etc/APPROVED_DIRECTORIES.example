@@ -1,6 +1,0 @@
-# Copy this file to APPROVED_DIRECTORIES and set its mode to 0600.
-# One existing absolute directory per line. Blank lines and # comments are ignored.
-# No quotes, ~, $HOME, shell commands, symlinked roots or relative paths.
-# Approve only directories containing material you intend to publish.
-# Example (uncomment and replace with your real notes directory):
-# /absolute/path/to/published-notes

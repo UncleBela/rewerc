@@ -1,4 +1,10 @@
 // Read-only CGI boundary. Symlinks require explicit private publication roots.
+#include "published-files.h"
+#include "auth.h"
+#include "utf8.h"
+#include <sys/resource.h>
+#include <csignal>
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -18,7 +24,6 @@
 extern char **environ;
 namespace fs = std::filesystem;
 using std::string;
-static const string approvalFile = "APPROVED_DIRECTORIES";
 
 struct Rejected {
     int status;
@@ -76,6 +81,20 @@ static int hexDigit(char c) {
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
+// Restrict path syntax without restricting authored names to ASCII.
+using text::validUtf8;
+static bool pathCharacter(unsigned char c) {
+    return c>=128 || asciiAlpha(c) || asciiDigit(c) || string("_+-/.,:; ()").find(c)!=string::npos;
+}
+static string encodePath(const string &path) {
+    static const char hex[]="0123456789ABCDEF";
+    string result;
+    for(unsigned char c:path) {
+        if(asciiAlpha(c)||asciiDigit(c)||string("-._~/").find(c)!=string::npos) result+=c;
+        else { result+='%'; result+=hex[c>>4]; result+=hex[c&15]; }
+    }
+    return result;
+}
 static string requestPath(const string &uri) {
     if (uri.size() > 8192) throw Rejected{414, "request URI is too long"};
     string path;
@@ -88,18 +107,18 @@ static string requestPath(const string &uri) {
             c = static_cast<char>(hexDigit(raw[i+1]) * 16 + hexDigit(raw[i+2]));
             i += 2;
         }
-        if (!asciiAlpha(c) && !asciiDigit(c) && string("_+-/.,:").find(c) == string::npos)
+        if (!pathCharacter(static_cast<unsigned char>(c)))
             throw Rejected{400, "invalid URL path"};
         if (c != '/' || path.empty() || path.back() != '/') path += c;
     }
+    if(!validUtf8(path)) throw Rejected{400,"invalid UTF-8 path"};
     if (path.empty() || path[0] != '/' || path.find("..") != string::npos)
         throw Rejected{403, "path traversal is forbidden"};
-    for (size_t i = 1; i < path.size(); ++i)
-        if (path.compare(i, approvalFile.size(), approvalFile) == 0 &&
-            path[i-1] == '/' && (i+approvalFile.size() == path.size() || path[i+approvalFile.size()] == '/'))
-            throw Rejected{404, "publication policy is private"};
-        else if (path[i-1] == '/' && (path[i] == '.' || path[i] == '_'))
-            throw Rejected{404, "private paths and account endpoints are unavailable"};
+    if(std::count(path.begin(),path.end(),'/')>33) throw Rejected{413,"directory depth limit exceeded"};
+    if(path=="/_users/login"||path=="/_users/logout") return path;
+    for(size_t i=1;i<path.size();++i)
+        if(path[i-1]=='/'&&(path[i]=='.'||path[i]=='_'))
+            throw Rejected{404,"private paths are unavailable"};
     const size_t dot = path.find_last_of('.');
     if (dot != string::npos) {
         string extension = path.substr(dot);
@@ -120,159 +139,6 @@ static Descriptor openDirectory(const fs::path &path) {
     }
     return fd;
 }
-// This list is plain data; physical paths never enter rc or HTML output.
-static std::vector<fs::path> approvedDirectories(const fs::path &root) {
-    Descriptor etc = openDirectory(root / "etc");
-    const int raw = openat(etc.get(), approvalFile.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    if (raw < 0 && errno == ENOENT) return {};
-    if (raw < 0) throw Rejected{403, "cannot open private APPROVED_DIRECTORIES"};
-    Descriptor file(raw);
-    struct stat info{};
-    if (fstat(file.get(), &info) != 0 || !S_ISREG(info.st_mode) ||
-        info.st_uid != geteuid() || (info.st_mode & 0077) || info.st_nlink != 1)
-        throw Rejected{403, "APPROVED_DIRECTORIES must be a private owner-only regular file"};
-    string data;
-    char buffer[4096];
-    ssize_t count;
-    while ((count = read(file.get(), buffer, sizeof buffer)) > 0) {
-        if (data.size() + static_cast<size_t>(count) > 65536)
-            throw Rejected{403, "APPROVED_DIRECTORIES exceeds its size limit"};
-        data.append(buffer, static_cast<size_t>(count));
-    }
-    if (count < 0) throw Rejected{403, "cannot read APPROVED_DIRECTORIES"};
-    std::vector<fs::path> result;
-    std::istringstream input(data);
-    string line;
-    while (std::getline(input, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const size_t first = line.find_first_not_of(" \t");
-        if (first == string::npos || line[first] == '#') continue;
-        line = line.substr(first, line.find_last_not_of(" \t") - first + 1);
-        for (unsigned char c : line)
-            if (c < 32 || c == 127) throw Rejected{403, "invalid approved directory entry"};
-        fs::path entry(line);
-        if (!entry.is_absolute() || entry == "/")
-            throw Rejected{403, "approved directories must be absolute, specific directories"};
-        // No variable expansion, relative traversal or linked root components.
-        Descriptor checked = openDirectory(entry);
-        std::error_code error;
-        const fs::path canonical = fs::canonical(entry, error);
-        if (error) throw Rejected{403, "approved directory is unavailable"};
-        if (result.size() == 256) throw Rejected{403, "too many approved directories"};
-        result.push_back(canonical);
-    }
-    return result;
-}
-static bool beneath(const fs::path &path, const fs::path &root) {
-    auto part = path.begin();
-    for (const auto &base : root) {
-        if (part == path.end() || *part != base) return false;
-        ++part;
-    }
-    return true;
-}
-static string lowerExtension(const fs::path &path) {
-    string value = path.extension().string();
-    for (char &c : value) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-    return value;
-}
-struct Publication {
-    fs::path project;
-    std::vector<fs::path> approved;
-    std::vector<std::pair<dev_t, ino_t>> ancestors;
-    std::vector<string> linkedDirectories;
-
-    void protectApplication(const fs::path &path) const {
-        for (const auto &part : path)
-            if (part == "_werc" || part == ".git")
-                throw Rejected{403, "private configuration cannot be published through links"};
-        if (path.filename() == approvalFile)
-            throw Rejected{403, "publication policy cannot be linked into a site"};
-        for (const char *privatePart : {"etc", "bin", "lib", "tpl", "apps", "var", ".git"})
-            if (beneath(path, project / privatePart))
-                throw Rejected{403, "application-private data cannot be published through links"};
-    }
-    fs::path linkedTarget(const fs::path &link) const {
-        std::error_code error;
-        fs::path target = fs::canonical(link, error);
-        if (error) throw Rejected{403, "linked target is missing or cyclic"};
-        bool allowed = false;
-        for (const auto &directory : approved) {
-            if (!beneath(target, directory)) continue;
-            const auto relative = target.lexically_relative(directory);
-            bool hidden = false;
-            for (const auto &part : relative) {
-                const string name = part.string();
-                if (name != "." && !name.empty() && (name[0] == '.' || name[0] == '_')) hidden = true;
-            }
-            if (!hidden) { allowed = true; break; }
-        }
-        if (!allowed) throw Rejected{403, "symlink or special file target is not in an approved directory"};
-        protectApplication(target);
-        const string extension = lowerExtension(target);
-        for (const char *code : {".tpl", ".rc", ".cgi", ".conf", ".py", ".pl", ".awk", ".cpp", ".h", ".db", ".sqlite", ".sqlite3"})
-            if (extension == code) throw Rejected{403, "linked source or state files are not publishable notes"};
-        return target;
-    }
-    void inspect(int fd, const fs::path &physical, const fs::path &relative,
-                 bool external = false, bool configuration = false) {
-        struct stat current{};
-        if (fstat(fd, &current) != 0) throw Rejected{403, "cannot inspect selected site"};
-        const auto identity = std::make_pair(current.st_dev, current.st_ino);
-        for (const auto &ancestor : ancestors)
-            if (ancestor == identity) throw Rejected{403, "linked directory cycle is forbidden"};
-        ancestors.push_back(identity);
-        Descriptor copy(dup(fd));
-        DIR *raw = fdopendir(copy.get());
-        if (!raw) throw Rejected{403, "cannot inspect selected site"};
-        copy.release();
-        struct CloseDirectory { void operator()(DIR *dir) const { closedir(dir); } };
-        std::unique_ptr<DIR, CloseDirectory> directory(raw);
-        while (true) {
-            errno = 0;
-            dirent *entry = readdir(directory.get());
-            if (!entry) {
-                if (errno) throw Rejected{403, "cannot inspect selected site"};
-                break;
-            }
-            const string name = entry->d_name;
-            if (name == "." || name == "..") continue;
-            const auto item = physical / name;
-            const auto visible = relative / name;
-            const bool code = configuration || name == "_werc" || lowerExtension(item) == ".tpl";
-            if (external) {
-                protectApplication(item);
-                if (name == "_werc" || lowerExtension(item) == ".tpl")
-                    throw Rejected{403, "linked directories cannot supply werc configuration or templates"};
-            }
-            struct stat info{};
-            if (fstatat(fd, name.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0)
-                throw Rejected{403, "cannot inspect selected site"};
-            if (S_ISLNK(info.st_mode)) {
-                if (code) throw Rejected{403, "configuration and template symlinks are forbidden"};
-                const auto target = linkedTarget(item);
-                Descriptor parent = openDirectory(target.parent_path());
-                Descriptor opened(openat(parent.get(), target.filename().c_str(),
-                    O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
-                if (fstat(opened.get(), &info) != 0) throw Rejected{403, "cannot inspect linked target"};
-                if (S_ISDIR(info.st_mode)) {
-                    inspect(opened.get(), target, visible, true, false);
-                    const string url = "/" + visible.generic_string() + "/";
-                    try { requestPath(url); linkedDirectories.push_back(url); }
-                    catch (const Rejected &) { /* Hidden/unroutable aliases stay out of navigation. */ }
-                } else if (!S_ISREG(info.st_mode)) {
-                    throw Rejected{403, "linked target is a special file"};
-                }
-            } else if (S_ISDIR(info.st_mode)) {
-                Descriptor child(openat(fd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-                inspect(child.get(), item, visible, external, code);
-            } else if (!S_ISREG(info.st_mode)) {
-                throw Rejected{403, "site contains a symlink or special file"};
-            }
-        }
-        ancestors.pop_back();
-    }
-};
 static void setEnvironment(const char *name, const string &value) {
     if (setenv(name, value.c_str(), 1) != 0) throw Rejected{500, "cannot initialize request environment"};
 }
@@ -283,8 +149,8 @@ static void clearIdentity() {
         if (!equal) continue;
         string key(*item, equal - *item);
         if (key.rfind("security_", 0) == 0 || key.rfind("post_arg_", 0) == 0 ||
-            key.rfind("logged_", 0) == 0 || key == "HTTP_COOKIE" || key == "HTTP_AUTHORIZATION" ||
-            key == "user_name" || key == "user_password") remove.push_back(key);
+            key.rfind("logged_", 0) == 0 || key == "HTTP_AUTHORIZATION" ||
+            key == "user_name" || key == "user_password" || key == "werc_authenticated" || key == "werc_auth_user") remove.push_back(key);
     }
     for (const string &key : remove)
         if (unsetenv(key.c_str()) != 0) throw Rejected{500, "cannot initialize request environment"};
@@ -294,7 +160,7 @@ static int reject(const Rejected &error, bool head) {
                         error.status == 403 ? "403 Forbidden" :
                         error.status == 404 ? "404 Not Found" :
                         error.status == 405 ? "405 Method Not Allowed" :
-                        error.status == 414 ? "414 URI Too Long" : "500 Internal Server Error";
+                        error.status == 503 ? "503 Service Unavailable" : error.status == 413 ? "413 Content Too Large" : error.status == 414 ? "414 URI Too Long" : "500 Internal Server Error";
     std::cout << "Status: " << title << "\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n";
     if (error.status == 405) std::cout << "Allow: GET, HEAD\r\n";
     std::cout << "\r\n";
@@ -302,45 +168,147 @@ static int reject(const Rejected &error, bool head) {
     std::cerr << "werc-guard: " << error.reason << '\n';
     return 1;
 }
-int main() {
-    const string method = environment("REQUEST_METHOD");
+static void inherit(const char *name,int fd) {
+    if(fcntl(fd,F_SETFD,0)<0) throw Rejected{500,"cannot retain request capabilities"};
+    setEnvironment(name,std::to_string(fd));
+}
+static int fileCommand(int argc,char **argv) {
+    if(!published::requestContext()) throw Rejected{403,"file commands require a guarded request"};
+    const string mode=argv[1];
+    if(mode=="--list" && argc>=3) {
+        std::vector<string> lines;
+        for(int i=2;i<argc;++i) {
+            auto entries=published::listDirectory(argv[i]);
+            lines.insert(lines.end(),entries.begin(),entries.end());
+        }
+        for(auto &line:lines) std::cout<<line<<'\n';
+        return 0;
+    }
+    if(mode=="--mtime" && argc==3) {
+        string name=argv[2];
+        Descriptor fd(!name.empty()&&name.back()=='/'?published::openDirectory(name):published::openFile(name));struct stat st{};
+        if(fstat(fd.get(),&st)!=0) throw Rejected{403,"cannot inspect content"};
+        std::cout<<st.st_mtime<<'\n';return 0;
+    }
+    if(mode=="--encode-path" && argc==3) { std::cout<<encodePath(argv[2]); return 0; }
+    if(mode=="--path-lines" && argc==2) {
+        string line;
+        while(std::getline(std::cin,line)) {
+            bool allowed=validUtf8(line);
+            for(unsigned char c:line) if(!pathCharacter(c)) allowed=false;
+            if(allowed) std::cout<<encodePath(line)<<'\t'<<line<<'\n';
+        }
+        return 0;
+    }
+    if(mode=="--template-code") {
+        std::vector<int> held;
+        std::vector<string> arguments={"awk","-f","bin/template.awk"};
+        for(int i=2;i<argc;++i) {
+            int fd=published::openFile(argv[i],published::Access::Code);
+            if(fcntl(fd,F_SETFD,0)<0) throw Rejected{500,"cannot pin template"};
+            held.push_back(fd); arguments.push_back(published::descriptorPath(fd));
+        }
+        if(held.empty()) arguments.push_back("/dev/null");
+        std::vector<char *> args;
+        for(auto &argument:arguments) args.push_back(argument.data());
+        args.push_back(nullptr); execvp(args[0],args.data());
+        throw Rejected{500,"cannot translate template"};
+    }
+    if(argc!=3 || (mode!="--read"&&mode!="--read-local"&&mode!="--config"))
+        throw Rejected{403,"invalid file command"};
+    const auto access=mode=="--config"?published::Access::Configuration:
+                      mode=="--read-local"?published::Access::Code:published::Access::Content;
+    const int fd=published::openFile(argv[2],access);
+    if(fd<0) return 0; // Absent local configuration is ordinary.
+    Descriptor file(fd);
+    char buffer[8192]; ssize_t count;
+    while((count=read(fd,buffer,sizeof buffer))>0) std::cout.write(buffer,count);
+    if(count<0 || !std::cout) throw Rejected{500,"cannot read pinned file"};
+    return 0;
+}
+static void requestLimits() {
+    struct Limit { int resource; rlim_t value; };
+    for(const auto &limit:std::vector<Limit>{{RLIMIT_CPU,5},{RLIMIT_AS,512ULL*1024*1024},{RLIMIT_FSIZE,32ULL*1024*1024},{RLIMIT_NOFILE,256},{RLIMIT_CORE,0}}) {
+        struct rlimit current{};
+        if(getrlimit(limit.resource,&current)!=0) throw Rejected{500,"cannot read process limits"};
+        current.rlim_cur=std::min(current.rlim_cur,limit.value);
+        if(setrlimit(limit.resource,&current)!=0) throw Rejected{500,"cannot set process limits"};
+    }
+    alarm(20);
+}
+int main(int argc,char **argv) {
+    const string method=environment("REQUEST_METHOD");
     try {
-        // Reject before reading stdin, inspecting content or starting rc.
-        if (method != "GET" && method != "HEAD") throw Rejected{405, "read-only publishing accepts GET and HEAD only"};
-        const string host = environment("SERVER_NAME");
-        const char *selector = std::getenv("WERC_SITE");
-        const string site = selector ? selector : host;
-        validateName(host);
-        validateName(site);
-        validatePort(environment("SERVER_PORT"));
-        const string uri = environment("REQUEST_URI");
-        const string path = requestPath(uri);
-        // The launcher enters bin/ before invoking this executable.
-        const fs::path root = fs::current_path().parent_path();
-        Publication publication{root, approvedDirectories(root), {}, {}};
-        {
-            Descriptor selected = openDirectory(root / "sites" / site);
-            publication.inspect(selected.get(), root / "sites" / site, {});
+        if(argc>1) {
+            string mode=argv[1];
+            if(mode=="--add-user"||mode=="--disable-user")
+                return auth::provision(fs::current_path(),argc,argv);
+            return fileCommand(argc,argv);
+        }
+        requestLimits();
+        const string host=environment("SERVER_NAME");
+        const char *selector=getenv("WERC_SITE");
+        const string site=selector?selector:host;
+        validateName(host);validateName(site);validatePort(environment("SERVER_PORT"));
+        const string uri=environment("REQUEST_URI"),path=requestPath(uri);
+        const bool account=path=="/_users/login"||path=="/_users/logout";
+        if(method!="GET"&&method!="HEAD"&&!(method=="POST"&&account))
+            throw Rejected{405,"only account endpoints accept POST"};
+        const fs::path root=fs::current_path().parent_path();
+        if(environment("WERC_DEVELOPMENT")!="yes") {
+            Descriptor etc=openDirectory(root/"etc");
+            int raw=openat(etc.get(),"service.uid",O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
+            if(raw<0)throw Rejected{503,"service account has not been prepared"};
+            Descriptor config(raw);
+            struct stat st{};char data[32];ssize_t count=read(config.get(),data,sizeof data);
+            if(fstat(config.get(),&st)!=0||!S_ISREG(st.st_mode)||(st.st_mode&0022)||count<2||count>=ssize_t(sizeof data))
+                throw Rejected{503,"service account has not been prepared"};
+            string value(data,count);
+            if(value.back()=='\n')value.pop_back();
+            if(value.empty()||value.find_first_not_of("0123456789")!=string::npos||value.size()>10||std::stoull(value)!=geteuid()||geteuid()==0)
+                throw Rejected{503,"CGI must run as the dedicated service account"};
         }
         clearIdentity();
-        string linkedDirectories;
-        for (const auto &alias : publication.linkedDirectories) {
-            const string parent = fs::path(alias.substr(0, alias.size()-1)).parent_path().generic_string() + "/";
-            if (parent == "//" || path.rfind(parent, 0) == 0) linkedDirectories += alias + "\n";
+        // Shared assets are deliberately public; every site attachment remains authenticated.
+        const bool publicAsset=path=="/pub/style/style.css"||path=="/pub/favicon.ico";
+        if(!publicAsset&&auth::request(root,site,path)) return 0;
+        unsetenv("HTTP_COOKIE");unsetenv("HTTP_AUTHORIZATION");
+        Descriptor project=openDirectory(root),selected=openDirectory(root/"sites"/site);
+        inherit("WERC_PROJECT_FD",project.get());inherit("WERC_SITE_FD",selected.get());
+        setEnvironment("werc_readonly","yes");setEnvironment("werc_site",site);
+        published::createBudget();
+        if(publicAsset) {
+            Descriptor file(published::openFile(path.substr(1),published::Access::Code));
+            std::cout<<"Content-Type: "<<(path=="/pub/style/style.css"?"text/css":"image/x-icon")<<"\r\nX-Content-Type-Options: nosniff\r\n\r\n";
+            if(method!="HEAD") { char data[8192];ssize_t n;while((n=read(file.get(),data,sizeof data))>0)std::cout.write(data,n); }
+            return 0;
         }
-        setEnvironment("werc_linked_dirs", linkedDirectories);
-        setEnvironment("werc_readonly", "yes");
-        setEnvironment("werc_site", site);
-        const size_t question = uri.find('?');
-        setEnvironment("REQUEST_URI", path + (question == string::npos ? "" : uri.substr(question)));
-        const string plan9 = environment("PLAN9");
-        if (plan9.empty()) throw Rejected{500, "PLAN9 must identify the Plan 9 installation"};
-        const string rc = plan9 + "/bin/rc";
-        execl(rc.c_str(), "rc", "-I", "./werc.rc", static_cast<char *>(nullptr));
-        throw Rejected{500, "cannot execute the rc interpreter"};
-    } catch (const Rejected &error) {
-        return reject(error, method == "HEAD");
-    } catch (const std::exception &) {
-        return reject({500, "cannot initialize read-only CGI"}, method == "HEAD");
+        // Only enumerate navigation ancestors; never scan unrelated subtrees.
+        fs::path directory=fs::path("sites")/site;
+        published::listDirectory(directory.string());
+        fs::path relative=path.substr(1);
+        if(path.back()!='/')relative=relative.parent_path();
+        for(const auto &part:relative) {
+            if(part.empty()||part==".")continue;
+            directory/=part;
+            published::listDirectory(directory.string());
+        }
+        setEnvironment("werc_request_path",path);
+        const auto question=uri.find('?');
+        setEnvironment("REQUEST_URI",path+(question==string::npos?"":uri.substr(question)));
+        const string plan9=environment("PLAN9");
+        if(plan9.empty())throw Rejected{500,"PLAN9 must identify Plan 9 installation"};
+        const string rc=plan9+"/bin/rc";
+        execl(rc.c_str(),"rc","-I","./werc.rc",static_cast<char*>(nullptr));
+        throw Rejected{500,"cannot execute rc"};
+    }catch(const Rejected &error){
+        if(argc>1){std::cerr<<"werc-guard: pinned file access failed\n";return 1;}
+        return reject(error,method=="HEAD");
+    }catch(const std::exception &error){
+        if(argc>1){std::cerr<<"werc-guard: pinned file access failed\n";return 1;}
+        // Fixed categories only; never log request data or credentials.
+        string message=error.what();
+        bool limited=message.find("limit")!=string::npos;
+        return reject({limited?413:403,limited?"request filesystem limit exceeded":"symlink or special file access rejected"},method=="HEAD");
     }
 }

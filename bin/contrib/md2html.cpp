@@ -1,6 +1,7 @@
 // Native Markdown renderer for werc. Build with: make -C bin/contrib md2html
 // UTF-8 is preserved as bytes; no locale-dependent conversion is performed.
 #include "metadata.h"
+#include "published-files.h"
 #include "callouts.h"
 #include "footnotes.h"
 #include "toc.h"
@@ -798,7 +799,7 @@ int main(int argc,char **argv) {
             if(arg=="--page-metadata") {
                 if(i+1 == argc) std::cout << metadata::pageAssignments({});
                 else if(i+2 == argc) {
-                    std::ifstream input(argv[i+1], std::ios::binary);
+                    published::Input input(argv[i+1]);
                     if(!input) throw std::runtime_error("cannot open " + string(argv[i+1]));
                     std::cout << metadata::pageAssignments(metadata::read(input));
                 } else throw std::runtime_error("--page-metadata accepts at most one file");
@@ -830,7 +831,7 @@ int main(int argc,char **argv) {
         if(files.empty()) files.push_back("-");
         for(auto &file:files) {
             if(file=="-") appendInput(std::cin);
-            else { std::ifstream in(file,std::ios::binary); if(!in) throw std::runtime_error("cannot open "+file); appendInput(in); if(in.bad()) throw std::runtime_error("cannot read "+file); }
+            else { published::Input in(file); if(!in) throw std::runtime_error("cannot open "+file); appendInput(in); if(in.bad()) throw std::runtime_error("cannot read "+file); }
         }
         if(std::cin.bad()) throw std::runtime_error("cannot read stdin");
         // Restricted imports/submissions are plain escaped text. No raw HTML,

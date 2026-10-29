@@ -37,6 +37,6 @@ fn mathjax_format {
         if(~ $#* 0)
             perl apps/mathjax/filter.pl protect | $mathjax_formatter | perl apps/mathjax/filter.pl restore
         if not
-            cat $* | perl apps/mathjax/filter.pl protect | $mathjax_formatter | perl apps/mathjax/filter.pl restore
+            { if(~ $werc_readonly yes) content_read $*; if not cat $* } | perl apps/mathjax/filter.pl protect | $mathjax_formatter | perl apps/mathjax/filter.pl restore
     }
 }

@@ -14,6 +14,8 @@ use Encode qw(decode);
 
 my $root = abs_path("$FindBin::Bin/../..");
 chdir $root or die $!;
+require "$root/bin/aux/TestAuth.pm";
+TestAuth::setup($root);
 my $dir = tempdir('notes-test-XXXXXX', DIR => "$root/sites", CLEANUP => 1);
 my $file = "$dir/page.md";
 sub write_file {
@@ -163,6 +165,7 @@ subtest 'full CGI combines publishing metadata, callouts, footnotes and math' =>
     write_file($file, "---\ntitle: Browser title\nlang: hu\n---\n\n> [!tip]+ A **tip**\n> Formula \$x_i\$.[^source]\n\n[^source]: A source with \$y_i\$.\n");
     local %ENV = (%ENV, REQUEST_METHOD => 'GET', SERVER_NAME => "$name",
         SERVER_PORT => '8080', REQUEST_URI => '/page', QUERY_STRING => '');
+    TestAuth::authorize();
     my ($out, $err, $status) = command('./bin/werc.cgi');
     is $status, 0, 'CGI succeeds';
     is $err, '', 'no CGI errors';

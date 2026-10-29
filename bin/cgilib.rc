@@ -9,11 +9,12 @@ fn http_redirect {
     if(~ $1 http://* https://*)
         t=$1
     if not if(~ $1 /*)
-        t=$"base_url^$1
+        t=$"base_url^`{url_path $1}
     if not
-        t=$"base_url^$"req_path^$1
+        t=$"base_url^`{url_path $"req_path^$1}
     exec /bin/echo 'Status: '^$2^'
 Location: '^$t^'
+Cache-Control: no-store
 '
     exit
 }
@@ -125,18 +126,26 @@ fn url_encode {
 ' $* 
 }
 
-# Compatibility hooks: no accounts, cookies or sessions are used.
+# Legacy cookie hooks stay disabled; the native guard owns session cookies.
 fn set_cookie { status='Cookies are unavailable in read-only mode' }
 fn get_cookie { status='Cookies are unavailable in read-only mode' }
 
 
 fn static_file {
+    echo 'Cache-Control: no-store'
+    echo 'X-Content-Type-Options: nosniff'
     echo -n 'Content-Type: '
     select_mime $1
     echo
     if(~ $REQUEST_METHOD HEAD)
         exit
-    exec cat $1
+    if(~ $werc_readonly yes)
+        {
+            if(~ $1 ./pub/*) exec $werc_root/bin/contrib/werc-guard --read-local $1
+            if not exec $werc_root/bin/contrib/werc-guard --read $1
+        }
+    if not
+        exec cat $1
 }
 
 fn select_mime {

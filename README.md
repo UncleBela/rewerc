@@ -1,21 +1,21 @@
 # rewerc
 
 rewerc is a file-based publishing system for notes, documentation and small
-websites. Its extends [werc](http://werc.cat-v.org/) with a native C++ Markdown
+websites. It extends [werc](http://werc.cat-v.org/) with a native C++ Markdown
 renderer, document metadata, mathematical notation (MathJax), tables, callouts, footnotes
 and a table of contents.
 
 Write a Markdown file, point your browser to it in the correct directory, and
 rewerc renders it inside the site's layout. Pages are rendered on request rather
 than built into a static site. Edit documents on disk: HTTP requests can read
-content but cannot log in or change it, and no account/session database is used.
+content after signing in, but cannot change authored files through the web.
 
 ## How the rendering works
 
 ```text
 Page request
   -> bin/werc.cgi                 sets the working directory and environment
-  -> bin/contrib/werc-guard       accepts GET/HEAD and validates paths/site files
+  -> bin/contrib/werc-guard       authenticates, validates paths and bounds filesystem work
   -> bin/werc.rc                  loads configuration and selects a page handler
   -> bin/contrib/md2html          renders Markdown, metadata and optional math
   -> rc templates                 assemble navigation, headers and the page body
@@ -31,7 +31,7 @@ FastCGI service.
 The main parts have distinct jobs:
 
 - **Plan 9 tools and rc** provide configuration, routing, app hooks and templates.
-- **A small C++ request guard** rejects write requests and unsafe paths before rc.
+- **A C++ request guard** handles sessions/login, rejects content writes and checks filesystem access before rc.
 - **C++** parses Markdown, extracts publishing metadata, recognizes equations and
   generates the MathJax header configuration.
 - **MathJax** typesets marked equations in the browser when the app is enabled.
@@ -50,12 +50,16 @@ The current implementation targets a Unix-like environment with:
 | --- | --- |
 | Plan 9 from User Space | The `rc` shell and utilities used by werc |
 | POSIX shell and common Unix utilities | CGI launcher and supporting commands |
-| A C++17 compiler and `make` | Building the renderer and POSIX request guard |
+| A C++17 compiler, Linux 5.6+ headers and `make` | Building the renderer and POSIX request guard |
+| OpenSSL and SQLite development libraries | Native password hashing and session storage |
+| GNU `timeout` | Per-request process-tree deadline |
+| Bubblewrap and fcgiwrap | Dedicated local worker isolation |
 | A CGI-capable server or CGI bridge | Invoking the application for HTTP requests |
 | Perl and its core modules | Regression tests and the optional legacy formatter |
+| Python 3 standard library | Security tests and authenticated test fixtures only |
 
 The Markdown renderer uses the C++ standard library; the request guard also uses
-POSIX filesystem/process calls. Neither adds a third-party library. MathJax is a
+Linux filesystem/process calls. The account backend links OpenSSL libcrypto and SQLite. MathJax is a
 browser dependency only when math is enabled; the default loader uses a CDN.
 
 ## Setup
@@ -78,7 +82,7 @@ build leaves its previous executable available; no webserver restart is needed.
 The launcher creates `var/tmp` automatically if it is absent; creating it here
 also supports standalone tests and tools. Runtime output is not supplied by Git.
 The serving user needs write access for scratch/cache output and any generated
-sitemap files, but ordinary page reads need no account/session database.
+sitemap files. Every protected request also checks the private account/session database.
 
 ### Check the local environment
 
@@ -147,16 +151,18 @@ can override or extend site configuration for their subtree.
 Configure your chosen server to invoke **`bin/werc.cgi`**, not `bin/werc.rc`.
 Direct rc entry fails closed because it bypasses the security boundary.
 
-Only GET and HEAD are accepted. Other methods return `405 Method Not Allowed`
-with `Allow: GET, HEAD`, without reading a request body or invoking rc. Account
-endpoints such as `/_users/login` return 404.
+Content accepts GET/HEAD only. The login/logout endpoints additionally accept
+POST through the native account backend; other methods and authoring POSTs are
+rejected before rc.
 
 Pass the usual CGI environment: `REQUEST_METHOD`, `REQUEST_URI`, `SERVER_NAME`,
 `SERVER_PORT` and `QUERY_STRING`. WERC_SITE is an optional trusted selector, not
 an HTTP header. Cookies, inherited identity and legacy POST variables are
-removed before rc starts; they cannot enable accounts or write features.
+removed before rc starts. Authenticated identity is supplied only by the native
+backend, and does not enable legacy authoring apps.
 
-Serve public assets directly, including the shared `pub/` directory at `/pub/`.
+Serve only deliberately public shared assets directly; the supplied allowlist
+contains the shared CSS and shared favicon. Site attachments require CGI.
 Do not expose the entire checkout as a static document root. Block configuration,
 source files, hidden paths and runtime state, including `_werc/`, `.git/`, `etc/`
 and `var/`. Static serving bypasses CGI checks, so access restrictions must also
@@ -173,217 +179,25 @@ For the selected site, paths map to files like this:
 | `notes/index.md` | `/notes/` |
 | `notes/example.md` | `/notes/example` |
 
-Use ASCII filenames for page URLs; Unicode document text and headings are
-supported. The sidebar is generated from the site's directory structure.
+UTF-8 filenames, including Hungarian accents, spaces and parentheses, work in
+nested directories. Werc keeps filesystem names
+unchanged and percent-encodes generated browser links and redirects. The sidebar
+is generated from the site's directory structure. Paths beginning with `.` or
+`_`, source/configuration files, traversal, control characters and unsafe URL
+characters remain restricted. No renaming is needed.
 Markdown headings and front matter do not rename the underlying file.
 
 The renderer supports paragraphs, six heading levels, links, images, emphasis,
 lists, blockquotes, code spans, fenced/indented code, horizontal rules and authored
 HTML. It is not a complete implementation of CommonMark or every Obsidian feature.
 
-### Link notes from another directory
+### Content directories
 
-Use the private **`etc/APPROVED_DIRECTORIES`** file to approve external content
-roots. Each nonblank line names one existing absolute directory:
-
-```text
-/home/you/Notes/public
-/home/you/Documents/course-notes
-```
-
-The file is optional: missing or empty approves no links. On a new checkout,
-copy `etc/APPROVED_DIRECTORIES.example` only if the private file does not already
-exist, then set its permissions:
-
-```sh
-chmod 600 etc/APPROVED_DIRECTORIES
-```
-
-The actual file must be owned by the Unix user running rewerc and have no group
-or other-user permissions. It cannot be a symlink, special file or hardlinked
-file. It is ignored by Git; the example is safe to publish. HTTP requests for
-APPROVED_DIRECTORIES are rejected at any URL depth, and physical approved paths
-are not exported to rc or HTML. Your webserver must also block this filename
-and keep the checkout's `etc/` outside public static roots. Unix owners can still
-read their own file; these permissions protect it from other local accounts,
-not from the process that must read it.
-
-Blank lines and full-line `#` comments are ignored. Paths may contain spaces,
-but are literal: no quotes, `~`, environment variables or shell commands are
-expanded. Use real directory paths without symlink components or `..`. The file
-is limited to 64 KiB and 256 entries; invalid entries fail closed. Changes take
-effect on the next CGI request, without rebuilding or restarting rewerc.
-
-Once a directory is approved, create a link **inside the selected site**, for
-example:
-
-```sh
-ln -s /home/you/Notes/public sites/rewerc-guide/linked-notes
-```
-
-An external `example.md` then appears at `/linked-notes/example`. Individual
-Markdown-file links work too. Directory links participate in navigation and
-sitemap generation; the selected site root itself must remain a real directory.
-
-Approving a directory is a publishing decision: use a directory containing only
-material intended for readers. Resolved targets must stay inside an approved
-root, including nested links; similarly named sibling directories do not qualify.
-Broken links, cycles, special files and escapes fail closed. Linked directories
-cannot contain `_werc` configuration or `.tpl` templates, and links inside local
-configuration/template paths are forbidden. Application-private areas and the
-policy file cannot be exposed through aliases. Approving notes does not grant
-permission to execute new rc code.
-
-This assumes trusted filesystem/content owners and is not protection against a
-local attacker who can change files during a request. Ordinary Markdown still
-permits authored HTML. The approval applies to CGI-rendered content; static
-assets served directly by your webserver retain that server's symlink rules.
-Do not turn off static-file protections globally to enable note links.
-
-### Front matter and publishing metadata
-
-Put a flat metadata block at the start of a Markdown document:
-
-```markdown
----
-title: Notes on motion
-description: Equations and worked examples.
-author: Your name
-date: 2026-10-29
-lang: en
-tags: [physics, examples]
-course: Mechanics
----
-
-# Motion
-
-The article begins here.
-```
-
-| Field | Effect |
-| --- | --- |
-| `title` | Browser-tab title; does not insert a visible article heading or change navigation labels |
-| `description` | HTML description metadata |
-| `author` | HTML author metadata and a visible byline |
-| `date`, `updated` | Explicit publication/update dates in the byline |
-| `lang` | HTML language attribute and supported navigation-label language |
-| `toc` | Controls the table of contents |
-| Other fields | Visible properties panel, preserving field order and spelling |
-
-The publishing fields and `toc` are omitted from the properties panel. Custom
-values are escaped plain text; empty fields show a dash, tags become chips, and
-HTTP/HTTPS values can become links. Dollar signs in metadata remain literal.
-
-The parser supports flat fields, quoted strings, bracket lists and indented dash
-lists. It is not a full YAML parser: nested mappings, anchors and block scalars
-are unsupported. Unsupported or unclosed blocks remain ordinary Markdown.
-
-Page fields override site defaults such as `meta_description`, `meta_author`,
-`meta_date`, `meta_updated` and `html_lang`; empty fields inherit defaults.
-Dates must be valid `YYYY-MM-DD` calendar dates. Invalid language/date values
-fall back or are omitted, and publication dates are never inferred from files.
-
-### Table of contents and heading links
-
-A table of contents appears by default when a native Markdown page has article
-headings. Hide it with `toc: false` in front matter. Heading IDs and their `#`
-permalinks remain available even when the outline is hidden.
-
-Only article-level headings join the outline; headings inside lists, blockquotes,
-callouts and endnotes still get anchors. Duplicate IDs receive numeric suffixes.
-Renaming headings or adding earlier duplicates can change fragment URLs.
-
-For `lang: hu` or a Hungarian regional tag, navigation uses Hungarian labels such
-as “Tartalomjegyzék”; otherwise it uses English. Visible accents are preserved,
-while Hungarian/common Latin accents are transliterated in generated IDs.
-
-### Tables
-
-```markdown
-| Formula     | Description | Value |
-| :---------- | :---------: | ----: |
-| $x_i + x_j$ | **Sum**     |    42 |
-```
-
-Separator cells need at least three hyphens. Colons control alignment. Cells
-support inline Markdown and enabled math; escaped pipes and pipes inside code or
-math do not split cells. Missing cells are padded and excess cells ignored.
-Each source row occupies one line.
-
-### Mathematics
-
-Enable the MathJax app in the relevant `_werc/config`:
-
-```rc
-conf_enable_mathjax
-```
-
-Then write inline or display math:
-
-```markdown
-Inline: $v = s/t$.
-
-Display:
-$$
-F = ma
-$$
-```
-
-The app enables the native renderer's `--math` flag and adds MathJax headers.
-C++ recognizes delimiters and emits escaped TeX; the browser performs typesetting.
-Without app enablement, ordinary serving leaves math recognition disabled.
-
-Code, metadata, HTML attributes and code-like HTML regions are excluded.
-Inline math cannot cross a newline or contain whitespace immediately inside its
-delimiters. Use `\$` for a literal dollar sign. Display math can span lines and
-blank lines, and math can be used in table cells.
-
-The default loader is pinned to MathJax 4.0.0 on jsDelivr. Set `mathjax_url` before
-`conf_enable_mathjax` to use another compatible source; self-hosting also needs
-its components and fonts. Custom head templates must preserve `extraHeaders`.
-See the [MathJax app guide](apps/mathjax/README.md) for further examples.
-
-### Callouts
-
-```markdown
-> [!note] Assumptions
-> We neglect air resistance.
-
-> [!example]+ Worked example
-> Apply $F = ma$.
-
-> [!warning]- Expand to read
-> A folded warning.
-```
-
-Callouts use the first line of a blockquote. Types include note, info, tip,
-warning, example, question, abstract, todo, success, failure, danger, bug and
-quote, with common aliases. Types are case-insensitive; unknown valid types use
-note styling. Titles and bodies support Markdown and enabled math.
-
-`+` creates an initially expanded foldable callout; `-` creates a collapsed one.
-Folding uses native `details`/`summary`, without JavaScript. Nest callouts with
-another `>` level and separate adjacent callouts with an unquoted blank line.
-
-### Footnotes
-
-```markdown
-A statement with a source.[^paper]
-
-[^paper]: **Author**, [paper](https://example.org/paper), 2026.
-
-    A continuation paragraph, indented by four spaces.
-```
-
-Definitions belong at document level and may precede or follow references.
-Numbering follows first use. Repeated references share a note and receive
-individual return links. Unused definitions are hidden, undefined references stay
-literal, and the first duplicate definition wins. Labels are case-sensitive.
-
-Footnote bodies support Markdown, tables, callouts and math. Code, raw HTML,
-metadata, equations and link/image labels do not create footnote references.
-Anonymous `^[inline notes]` are not supported. State and generated IDs are local
-to each rendered document; combining fragments requires distinct ID namespaces.
+Published content must live inside the selected real site directory. Symlink
+publishing is unsupported: the native reader rejects linked path components,
+and directory listings reject links rather than following them. No external
+approval file is used. Move or copy reviewed content deliberately; do not point
+the site at a directory containing private material.
 
 ## Layout, templates and printing
 
@@ -401,33 +215,108 @@ call and executed in an isolated rc child. Template edits do not require a
 compiled-template cache or a rebuild. Treat template/configuration authors as
 trusted code authors.
 
-## Read-only request boundary
+## Accounts and local service
 
-`bin/contrib/werc-guard` runs before rc. It accepts only GET/HEAD, validates the
-hostname, port, site selector and decoded URL, and rejects traversal, private
-components, source/state extensions and oversized URIs. Site directories are
-opened without following symlinks. A descriptor-based tree inspection rejects
-unapproved links, executable linked configuration, special files and inspection
-errors. Approved note links are described below.
+Pages, directory listings and site attachments require a valid session. Only the
+shared `/pub/style/style.css` and `/pub/favicon.ico` are public in the supplied
+server configuration. Your webserver must send every other content/attachment
+request to the fixed `bin/werc.cgi` script, including PDFs, images and text files.
+Serving them directly would bypass authentication. Webservers such as lighttpd
+or nginx invoke this CGI boundary through their CGI/FastCGI integration.
 
-There are no logins, accounts, password hashes, sessions, cookies, CSRF tokens or
-web-based writes. Authentication and write compatibility hooks always fail,
-regardless of cookies or inherited account variables. The retained
-`bin/aux/addwuser.rc` refuses account creation rather than writing a password file.
-Do not expose content as private on the assumption that rewerc authenticates it;
-use separately reviewed server-side access controls if private publication is
-required. Hiding a page from navigation does not make it private.
+The native backend uses OpenSSL scrypt (`N=131072`, `r=8`, `p=1`) with random
+salts. It stores account hashes and hashed random session identifiers in private
+SQLite state. Cookies are HttpOnly and SameSite=Strict, and acquire Secure on
+actual HTTPS requests. The supplied instance remains HTTP on loopback. Never
+expose this HTTP setup remotely or trust arbitrary forwarding headers for HTTPS.
+Account names are ASCII identifiers; passwords may contain UTF-8 and must be
+12–1024 bytes. All provisioned accounts can read the whole selected site; there
+are no per-directory account permissions or web authoring.
 
-The unused wiki/blog/comments/paste apps remain in the tree. Their presence or
-configuration cannot enable HTTP writes. Existing blog pages, escaped comments
-and text files can still be read; submission/login controls are disabled. A
-future editing feature would require a separate security design rather than
-turning the old account helpers back on.
+`/_users/login` and `/_users/logout` serve ordinary HTML forms. Login rotates the
+session; logout requires POST. Both POST operations require a session CSRF token,
+an exact matching browser Origin and a bounded uniquely named UTF-8 form
+(64 KiB, 32 fields). Sessions expire after eight hours or 30 minutes idle; login
+challenges expire after ten minutes. Password changes and account disabling
+revoke that user's sessions. Failed login attempts are throttled before hashing,
+with per-user, per-address and global budgets. Session/rate tables are bounded.
+No public registration or password reset endpoint is provided.
 
-The request guard assumes trusted content/configuration owners; it is not a
-sandbox against a local user who can replace files or edit executable rc code.
-Static-file serving also needs its own restrictions. These checks do not replace
-review of a public deployment, HTTPS behavior or private-file access rules.
+### Prepare the dedicated worker
+
+Run these commands from the checkout on the local Artix machine after reviewing
+the two scripts. They require administrator privileges for account creation;
+the coding agent has not executed them:
+
+```sh
+sudo ./bin/aux/service-setup.sh anon
+sudo -u rewerc env WERC_AUTH_DIR="$PWD/var/service/auth" ./bin/aux/addwuser.rc YOUR_USERNAME
+sudo -u rewerc ./bin/aux/service-run.sh
+```
+
+`anon` is the current webserver account; change it for another local account.
+The account command prompts for a password without echoing it and asks for
+confirmation. Repeating it resets that account's password and revokes sessions.
+To disable an account:
+
+```sh
+sudo -u rewerc env WERC_AUTH_DIR="$PWD/var/service/auth" ./bin/contrib/werc-guard --disable-user YOUR_USERNAME
+```
+
+Preparation creates non-login `rewerc`, a local ignored `etc/service.uid` marker,
+and private `var/service` runtime directories. It does not recursively change
+authored content or code ownership. Keep code, configuration and content owned
+by the publisher/administrator, readable but unwritable by the serving account.
+The serving account must be able to traverse the checkout's parent directories.
+
+The foreground worker is intended for your preferred supervisor. Bubblewrap
+mounts code/content read-only, exposes only private scratch/auth/socket storage
+as writable host directories, hides unrelated home files, drops capabilities
+and isolates networking. It refuses to start if isolation is unavailable. The
+socket is `var/service/socket/werc.sock`; it inherits the webserver's group
+without granting the worker membership in the publisher's group. Stop and wait
+for the previous worker before removing a stale socket. Manage the complete
+worker process tree through the supervisor.
+
+The sibling local webserver's `start.sh` now expects this worker to be running;
+it no longer launches a worker as your normal account. Activation is a deliberate
+host operation. No service was restarted during implementation. Once prepared,
+visit `http://localhost:8080/_users/login`.
+
+By default CGI refuses to run without the prepared service UID. Explicit
+`WERC_DEVELOPMENT=yes` permits a normal-user development instance, but does not
+bypass authentication. It is used by disposable regression fixtures and is not
+set in the supplied webserver configuration. Do not enable it for the isolated
+service. Native provisioning/testing uses `WERC_AUTH_DIR` only from trusted
+process configuration; never derive it from request data. Fresh installs have
+no default password and remain closed until an account is provisioned.
+
+## Request and filesystem boundary
+
+`werc-guard` validates the hostname, numeric port, site and once-decoded UTF-8
+URL before rc. GET/HEAD are allowed for protected content; POST is limited to
+the two account routes. Private paths, source/state files, traversal, unsafe
+characters and unsupported methods are rejected. The old authoring/account
+hooks remain disabled, so enabling a retained app cannot restore HTTP writes.
+
+Content, metadata, templates, configuration and directory listings use pinned
+root descriptors with Linux `openat2` no-follow resolution. No symlink target is
+accepted. Linux 5.6+, suitable headers and mounted `/proc` are required; there is
+no unsafe fallback. Built-in navigation enumerates only the requested ancestors,
+not the whole site. Limits are 32 path components, 2,048 entries per listing and
+a shared 16,384-operation budget per request, including helper subprocesses.
+Sitemaps use the same bounded listing API and keep generated exports in private
+`var/tmp/sitemaps/SITE/`; they no longer write into the site directory.
+
+CGI processes have CPU (5 seconds), memory (512 MiB), open-file (256), regular
+output-file (32 MiB) and wall-clock limits. The launcher uses a 25-second process
+tree timeout with a two-second termination grace period. The supplied server
+also limits request rate and concurrent connections. These are explicit ceilings,
+not a guarantee against every denial-of-service scenario.
+
+Executable configuration/template owners remain trusted. Custom templates must
+use `content_read`, `local_read` and `list_content` rather than arbitrary shell
+reads. Authored Markdown/HTML behavior is unchanged.
 
 ### Trusted and untrusted documents
 
@@ -498,7 +387,8 @@ From the repository root:
 ```sh
 make -C bin/contrib
 prove bin/aux/test-toc.pl bin/aux/test-callouts-footnotes.pl bin/aux/test-metadata.pl bin/aux/test-templates.pl bin/aux/test-markdown.pl apps/mathjax/test_mathjax.pl
-prove bin/aux/test-readonly.pl bin/aux/test-approved-directories.pl
+prove bin/aux/test-readonly.pl
+python3 -B bin/aux/test-security.py
 ```
 
 For legacy formatter compatibility:
@@ -507,7 +397,7 @@ For legacy formatter compatibility:
 MARKDOWN_FORMATTER=markdown.pl prove bin/aux/test-markdown.pl apps/mathjax/test_mathjax.pl
 ```
 
-Tests use disposable sites/state. They cover native rendering, rc templates,
+Tests use disposable authenticated sites/state; Python is a test dependency, not a serving dependency. They cover native rendering, rc templates,
 metadata, math, callouts/footnotes/TOC, request validation, rejection of writes,
 portable startup, symlink checks and adversarial parser inputs. They do not prove browser MathJax layout,
 print pagination or a production deployment's access controls.
@@ -519,7 +409,7 @@ env REQUEST_METHOD=GET SERVER_NAME=localhost SERVER_PORT=8080 \
     WERC_SITE=rewerc-guide REQUEST_URI=/ QUERY_STRING= ./bin/werc.cgi
 ```
 
-This writes CGI headers and HTML to stdout and diagnostics to stderr; it does
+Without a session this returns a login redirect (or a service setup error). It writes CGI headers to stdout and diagnostics to stderr; it does
 not run browser JavaScript. A “Request rejected” response can indicate a missing
 selected site, unsafe paths/symlinks, invalid CGI environment or an unsupported
 HTTP method. Check the selected directory and runtime setup before weakening validation.

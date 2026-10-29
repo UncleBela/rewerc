@@ -4,16 +4,18 @@ fn nav_tree {
     if(! ~ $#sideBarNavTitle 0)
         echo '<p class="sideBarTitle">'$"sideBarNavTitle':</p>'
     # Ignore stderr, last path element might be a file that doesn't exist (eg., foo for foo.md)
-    # /./ to deal with p9p's ls failure to follow dir symlinks otherwise
-    ls -F $sitedir/./$req_paths_list >[2]/dev/null \
+    # Enumeration is descriptor-relative and bounded by the native guard.
+    list_content $sitedir/$req_paths_list >[2]/dev/null \
         | { 
             sed $dirfilter'/\/[^_.\/][^\/]*(\.(md|txt|html)|\/)$/!d; s!^'$sitedir'!!; '$dirclean 
             if(! ~ $#synth_paths 0) echo $synth_paths | tr ' ' $NEW_LINE
-            if(! ~ $"werc_linked_dirs '') echo -n $"werc_linked_dirs
-        } | sort -u | awk -F/ ' 
+        } | sort -u | path_lines | awk -F/ '
     function p(x, y, s) { for(i=0; i < x-y; i+=1) print s }
     BEGIN { lNF=2; print "<ul>" }
     { 
+        split($0, entry, "\t")
+        url = entry[1]
+        $0 = entry[2]
         d = ""
         if(match($0, "/$"))
             d = "/"
@@ -32,9 +34,9 @@ fn nav_tree {
         gsub(/[^\/]$/, "&/", pa) 
 
         if(index(ENVIRON["req_path"] "/", pa) == 1)
-            print "<li><a href=\"" path "\" class=\"thisPage\">&raquo;<i> " bname "</i></a></li>"
+            print "<li><a href=\"" url "\" class=\"thisPage\">&raquo;<i> " bname "</i></a></li>"
         else 
-            print "<li><a href=\"" path "\">&rsaquo; " bname "</a></li>"
+            print "<li><a href=\"" url "\">&rsaquo; " bname "</a></li>"
     }
     END { p(lNF, 2, "</ul></li>"); print "</ul>" }'
 }
@@ -58,27 +60,26 @@ fn tpl_handler { template $* }
 
 fn html_handler {
     # body states: 0 = no <body> found, 2 = after <body>, 1 = after <body></body>, -1 = after </body>
-    awk 'gsub(".*<[Bb][Oo][Dd][Yy][^>]*>", "") > 0 {body=2}
+    content_read $1 | awk 'gsub(".*<[Bb][Oo][Dd][Yy][^>]*>", "") > 0 {body=2}
         gsub("</ *[Bb][Oo][Dd][Yy][^>]*>.*", "") > 0 {print; body=body-1}
         body==2 {print}
         body==0 {buf=buf "\n" $0}
-        END {if(body<=0) {print buf}}' < $1
+        END {if(body<=0) {print buf}}'
 }
 
 fn txt_handler {
     # Note: Words are not broken, even if they are way beyond 82 chars long
     echo '<pre>'
-    escape_html < $1 | fmt -l 82 -j
+    content_read $1 | escape_html | fmt -l 82 -j
     echo '</pre>'
 }
 
 fn dir_listing_handler {
-    d=`{basename -d $1}
+    ifs=$NEW_LINE { d=`{basename -d $1} }
     if(~ $#d 0)
         d='/'
     echo $d|sed 's,.*//,,g; s,/$,,; s,/, / ,g; s,.*,<h1 class="dir-list-head">&</h1> <ul class="dir-list">,'
-    # Symlinks suck: '/.' forces ls to list the linked dir if $d is a symlink.
-    ls -F $dir_listing_ls_opts $sitedir$d/. | sed $dirfilter$dirclean' s,.*/([^/]+/?)$,<li><a href="\1">\1</a></li>,'
+    list_content $sitedir$d/ | sed $dirfilter$dirclean' s,.*/([^/]+/?)$,\1,' | path_lines | awk -F '\t' '{ print "<li><a href=\""$1"\">"$2"</a></li>" }'
     echo '</ul>'
 }
 

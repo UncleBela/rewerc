@@ -9,9 +9,8 @@ cd ..
 forbidden_uri_chars='[^a-zA-Z0-9_+\-\/\.,:]'
 difs=$ifs # Used to restore default ifs when needed 
 
-# Expected input: ls -F style, $sitedir/path/to/files/
-#          <ls -F+x><symlink hack><Useless?><hiden files  >
-dirfilter='s/\*$//; s,/+\./+,/,g; s,^\./,,; /\/[._][^\/]/d; /'$forbidden_uri_chars'/d; /\/sitemap\.xml$/d; /\/index\.(md|html|txt|tpl)$/d; /\/(robots|sitemap)\.txt$/d; /_werc\/?$/d; '
+# Expected input: bounded native listing, $sitedir/path/to/files/
+dirfilter='s/\*$//; s,/+\./+,/,g; s,^\./,,; /\/[._][^\/]/d; /\/sitemap\.xml$/d; /\/index\.(md|html|txt|tpl)$/d; /\/(robots|sitemap)\.txt$/d; /_werc\/?$/d; '
 dirclean=' s/\.(md|html|txt)$//; '
 
 # Careful, the proper p9p path might not be set until initrc.local is sourced
@@ -35,7 +34,7 @@ for(a in $werc_apps)
 
 fn werc_exec_request {
     # Direct execution cannot bypass the native read-only request guard.
-    if(! ~ $werc_readonly yes || ! ~ $REQUEST_METHOD GET HEAD) {
+    if(! ~ $werc_readonly yes || ! ~ $werc_authenticated yes || ! ~ $REQUEST_METHOD GET HEAD) {
         echo 'Status: 405 Method Not Allowed'
         echo 'Allow: GET, HEAD'
         echo 'Content-Type: text/plain'
@@ -51,11 +50,9 @@ fn werc_exec_request {
     master_template=`{get_lib_file default_master.tpl}
     current_date_time=`{date}
 
-    # Note: $REQUEST_URI is not officially in CGI 1.1, but seems to be de-facto
-    # Note: We only urldecode %5F->'_' because some sites (stackoverflow.com?) urlencode it in their links,
-    # perhaps we should completel urldecode the whole url.
-    req_path=`{echo -n $REQUEST_URI | sed 's/\?.*//; s!//+!/!g; s/%5[Ff]/_/g; s/'^$forbidden_uri_chars^'//g; s/\.\.*/./g; 1q'}
-    req_url=$base_url^$req_path
+    # Already decoded and validated once by the native boundary.
+    req_path=$werc_request_path
+    req_url=$base_url^`{url_path $req_path}
     local_path=$sitedir$req_path
     local_file=''
     ifs='/' { args=`{echo -n $req_path} }
@@ -66,12 +63,7 @@ fn werc_exec_request {
     if(~ $local_path */) {
         if(test -d $local_path/.)
             local_path=$local_path^'index'
-        # XXX: This redir might step on apps with synthetic dirs.
-        if not if(ls `{basename -d $local_path}^* >/dev/null >[2]/dev/null)
-            perm_redirect `{echo $req_path|sed 's,/+$,,'}
     }
-    if not if(~ $req_path *'.' *',' *';' *':')
-        perm_redirect `{echo $req_path | sed 's/[.,;:)]$//'}
     if not if(test -d $local_path/.)
         perm_redirect $req_path^'/'
 
@@ -81,16 +73,14 @@ fn werc_exec_request {
     cd $sitedir
     req_paths_list='/' # Note: req_paths_list doesn't include 'stnythetic' dirs.
     conf_wd='/' # Used in config files to know where we are in the document tree.
-    if(test -f _werc/config)
-        . _werc/config
+    load_config $sitedir/_werc/config
     for(i in $args) {
         conf_wd=$conf_wd^$i
         req_paths_list=($req_paths_list $conf_wd)
         if(test -d $i/.) {
             conf_wd=$conf_wd'/'
             cd $i
-            if(test -f _werc/config)
-                . _werc/config
+            load_config $sitedir$conf_wd^'_werc/config'
         }
     }
     cd $werc_root

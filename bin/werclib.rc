@@ -1,3 +1,8 @@
+fn list_content { $werc_root/bin/contrib/werc-guard --list $* }
+# Paths remain raw filesystem names internally and encoded only in URLs.
+fn url_path { $werc_root/bin/contrib/werc-guard --encode-path $1 }
+fn path_lines { $werc_root/bin/contrib/werc-guard --path-lines }
+
 fn get_lib_file {
     if(! ~ $#sitedir 0 && test -f $sitedir/_werc/lib/$1)
         echo -n $sitedir/_werc/lib/$1
@@ -11,12 +16,53 @@ fn get_lib_file {
         status='Can''t find lib file: '$1
 }
 
+fn content_read {
+    if(~ $werc_readonly yes) {
+        for(f in $*)
+            $werc_root/bin/contrib/werc-guard --read $f
+    }
+    if not
+        cat $*
+}
+fn local_read {
+    if(~ $werc_readonly yes)
+        $werc_root/bin/contrib/werc-guard --read-local $1
+    if not
+        cat $1
+}
+fn template_code {
+    if(~ $werc_readonly yes)
+        $werc_root/bin/contrib/werc-guard --template-code $*
+    if not
+        awk -f bin/template.awk $*
+}
+fn load_config {
+    if(~ $werc_readonly yes) {
+        ifs='' { _werc_config=`{
+            if($werc_root/bin/contrib/werc-guard --config $1) {
+                echo
+                echo -n '#WERC_CONFIG_OK'
+            }
+        } }
+        if(! ~ $"_werc_config *'#WERC_CONFIG_OK') {
+            echo 'Status: 403 Forbidden'
+            echo 'Content-Type: text/plain'
+            echo
+            if(! ~ $REQUEST_METHOD HEAD) echo 'Configuration access rejected.'
+            exit
+        }
+        eval $"_werc_config
+        _werc_config=()
+    }
+    if not if(test -f $1)
+        . $1
+}
 fn template {
     if(~ $"rcargs -I) {
         # Reparse current files without starting another rc interpreter.
         # The child preserves the original isolation of template side effects.
         @ {
-            ifs='' { _werc_template_code=`{awk -f bin/template.awk $*} }
+            ifs='' { _werc_template_code=`{template_code $*} }
             # Match the positional context of rc reading generated code on stdin.
             *=()
             0=/dev/stdin
@@ -24,7 +70,7 @@ fn template {
         }
     }
     if not
-        awk -f bin/template.awk $* | rc $rcargs
+        template_code $* | rc $rcargs
 }
 
 # One bounded native read supplies only fixed-name, safely quoted assignments.
@@ -37,9 +83,9 @@ fn load_page_metadata {
     _werc_page_metadata=()
 }
 
-# Compatibility hooks for retained apps. Publishing never authenticates users
-# or permits a write, even if old account/session values are inherited.
-fn get_user { logged_user=(); status='Accounts are unavailable in read-only mode' }
+# Legacy authoring hooks remain disabled. Native sessions grant read access
+# before rc starts; they never enable retained apps to accept writes.
+fn get_user { logged_user=(); status='Legacy authoring accounts are disabled' }
 fn login_user { get_user }
 fn auth_user { get_user }
 fn check_user { get_user }
@@ -50,7 +96,7 @@ fn user_controls { status=() }
 
 # .md '(meta-)data' extract
 fn get_md_file_attr {
-    sed -n '/^\* '$2': /p; /^\* '$2': /q; /^$/q' < $1
+    content_read $1 | sed -n '/^\* '$2': /p; /^\* '$2': /q; /^$/q'
 }
 
 
@@ -58,15 +104,15 @@ fn get_md_file_attr {
 fn get_md_title {
     #sed 's/^(................................................................[^ ]*).*$/\1/g; 1q' < $1 
     # Only the opening title, underline and blank line can match.
-    sed -n '1N; /^.*\n===*$/!q; N; /.*\n===*\n *$/!q; s/\n==*\n//p; q' < $1
+    content_read $1 | sed -n '1N; /^.*\n===*$/!q; N; /.*\n===*\n *$/!q; s/\n==*\n//p; q'
 }
 
 fn get_html_title {
-    t=`{sed -n '32q; s/^.*<[Tt][Ii][Tt][Ll][Ee]> *([^<]+) *(<\/[Tt][Ii][Tt][Ll][Ee]>.*)?$/\1/p' < $1}
+    t=`{content_read $1 | sed -n '32q; s/^.*<[Tt][Ii][Tt][Ll][Ee]> *([^<]+) *(<\/[Tt][Ii][Tt][Ll][Ee]>.*)?$/\1/p'}
 
     # As a backup we might want to pick the first 'non-tag' text in the file with:
     if(~ $"t '')
-        t=`{sed -n -e 's/^(<[^>]+>)*([^<]+).*/\2/p; 32q' < $1 | sed 1q}
+        t=`{content_read $1 | sed -n -e 's/^(<[^>]+>)*([^<]+).*/\2/p; 32q' | sed 1q}
 
     echo $t
 }

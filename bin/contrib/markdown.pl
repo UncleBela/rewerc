@@ -212,7 +212,17 @@ else {
 		my $text;
 		{
 			local $/;               # Slurp the whole file
-			$text = <>;
+			if (($ENV{werc_readonly} // '') eq 'yes' && @ARGV) {
+                $text = '';
+                for my $file (@ARGV) {
+                    open my $input, '-|', "$ENV{werc_root}/bin/contrib/werc-guard", '--read', $file
+                        or die "Cannot open publication input\n";
+                    $text .= <$input> // '';
+                    close $input or die "Publication input rejected\n";
+                }
+            } else {
+                $text = <>;
+            }
 		}
         print Markdown($text);
     }

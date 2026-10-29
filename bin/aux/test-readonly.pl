@@ -16,6 +16,8 @@ use POSIX qw(mkfifo);
 
 my $root = abs_path("$FindBin::Bin/../..");
 chdir $root or die $!;
+require "$root/bin/aux/TestAuth.pm";
+TestAuth::setup($root);
 make_path("$root/var");
 my $scratch = tempdir('readonly-test-XXXXXX', DIR => "$root/var", CLEANUP => 1);
 my $site = tempdir('readonly-site-XXXXXX', DIR => "$root/sites", CLEANUP => 1);
@@ -62,6 +64,7 @@ sub cgi {
     local %ENV = (%ENV, PLAN9 => '/opt/plan9', SERVER_NAME => 'localhost',
         SERVER_PORT => '8080', WERC_SITE => $name, REQUEST_URI => $uri,
         QUERY_STRING => '', REQUEST_METHOD => $method // 'GET', %{ $extra // {} });
+    TestAuth::authorize() unless exists($extra->{HTTP_COOKIE});
     return command('', './bin/werc.cgi');
 }
 sub snapshot {
@@ -122,7 +125,7 @@ subtest 'all write methods rejected before body parsing or rc' => sub {
 subtest 'private, source, account and traversal paths are unavailable' => sub {
     for my $uri ('/../secret', '/%2e%2e/secret', '/_werc/config', '/%5fwerc/config',
                  '/.git/config', '/index.md', '/index.MD', '/secret.sqlite3',
-                 '/_users/login', '/_users/logout', '//_users//login', '/%255fwerc/config',
+                 '/_users/register', '/_users/private', '/%255fwerc/config',
                  '/x%00', '/x%ZZ', '/x%2', '/x\\y', '/pub/../_werc/config') {
         my ($out, undef, $status) = cgi($uri);
         isnt $status, 0, "$uri rejected";
@@ -159,13 +162,15 @@ subtest 'symlinks and special files in the selected site fail closed' => sub {
     isnt $alias_status, 0, 'selected site root cannot be a symlink';
     unlink "$site-alias" or die $!;
 };
-subtest 'cookies and inherited identity cannot enable accounts or writes' => sub {
+subtest 'forged cookies and inherited identity cannot authenticate or write' => sub {
     my ($out, $err, $status) = cgi('/', 'GET', {
         HTTP_COOKIE => 'werc_user=admin:0:secret; werc_session=forged',
         security_user => 'admin', logged_user => 'admin', security_ready => 'yes',
         post_arg_dirdir_save => 'Save', post_arg_edit_text => 'forged replacement',
     });
-    is $status, 0, 'reading ignores stale/forged account cookies';
+    is $status, 0, 'forged session receives a controlled response';
+    like $out,qr/Location: \/_users\/login/,'forged session cannot read protected content';
+    unlike $out,qr/Public page/,'protected body withheld';
     is $err, '', 'no credentials in diagnostics';
     unlike $out, qr/Set-Cookie|forged replacement/, 'no session or submitted content used';
     like read_file("$site/index.md"), qr/Public page/, 'content unchanged';
@@ -228,9 +233,9 @@ RC
     unlike $legacy . $legacy_err, qr/do-not-log-me/, 'password argument never displayed';
     ok !-e "$scratch/etc/users/alice/password", 'no credential file written';
 };
-subtest 'portable launcher starts without Python, SQLite or pre-existing runtime directories' => sub {
+subtest 'portable launcher uses authenticated native backend and initializes scratch storage' => sub {
     my $install = "$scratch/fresh-checkout";
-    make_path("$install/bin/contrib", "$install/sites/example", "$install/plan9/bin", "$install/etc");
+    make_path("$install/bin/contrib", "$install/sites/example/a", "$install/plan9/bin", "$install/etc");
     copy('bin/werc.cgi', "$install/bin/werc.cgi") or die $!;
     copy('bin/contrib/werc-guard', "$install/bin/contrib/werc-guard") or die $!;
     chmod 0755, "$install/bin/werc.cgi", "$install/bin/contrib/werc-guard";
@@ -243,13 +248,14 @@ SH
         SERVER_PORT => '8080', WERC_SITE => 'example', REQUEST_URI => '/%61//b?x=1',
         REQUEST_METHOD => 'GET', security_user => 'admin', HTTP_COOKIE => 'credential',
         post_arg_edit_text => 'injected');
+    TestAuth::authorize('example','example');
     ok !-e "$install/var", 'fresh install starts without runtime state';
     my ($out, $err, $status) = command('', "$install/bin/werc.cgi");
     is $status, 0, 'launcher and native guard execute from another directory';
     is $err, '', 'no Python/interpreter or database error';
     like $out, qr!yes\|example\|/a/b\?x=1\|unset\|unset\|unset!, 'guard normalizes paths and scrubs identity before rc';
     ok -d "$install/var/tmp", 'scratch directory initialized';
-    ok !-e "$install/var/security", 'no account database or security directory created';
+    ok !-e "$install/var/security", 'obsolete security directory is not recreated';
     my ($rejected, undef, $code) = cgi('/', 'POST');
     like $rejected, qr/Status: 405/, 'write rejection remains explicit';
 };

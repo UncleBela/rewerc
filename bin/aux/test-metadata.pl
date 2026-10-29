@@ -14,6 +14,8 @@ use Encode qw(decode);
 
 my $root = abs_path("$FindBin::Bin/../..");
 chdir $root or die $!;
+require "$root/bin/aux/TestAuth.pm";
+TestAuth::setup($root);
 my $dir = tempdir('metadata-test-XXXXXX', DIR => "$root/sites", CLEANUP => 1);
 my ($name) = $dir =~ m{/([^/]+)$};
 my $page = "$dir/page.md";
@@ -50,6 +52,7 @@ sub cgi {
     write_file($page, $text);
     local %ENV = (%ENV, REQUEST_METHOD => 'GET', SERVER_NAME => "$name",
         SERVER_PORT => '8080', REQUEST_URI => '/page', QUERY_STRING => '');
+    TestAuth::authorize();
     my ($out, $err, $status) = command('./bin/werc.cgi');
     is $status, 0, 'CGI succeeds';
     is $err, '', 'no CGI errors';

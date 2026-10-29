@@ -11,4 +11,5 @@ mkdir -p "$TMPDIR"
 case ${SERVER_NAME-} in
     localhost) export WERC_SITE=${WERC_SITE-rewerc-guide} ;;
 esac
-exec ./contrib/werc-guard
+# timeout gives every CGI process tree a deadline, including formatter children.
+exec timeout --signal=TERM --kill-after=2s 25s ./contrib/werc-guard

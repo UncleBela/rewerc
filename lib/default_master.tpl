@@ -1,6 +1,6 @@
 <div id="header">
     <div class="superHeader">
-% cat `{ get_lib_file top_bar.inc }
+% local_read `{ get_lib_file top_bar.inc }
     </div>
 
     <div class="midHeader">
@@ -21,6 +21,7 @@
 % }
 
 <div id="main-copy">
+<p><a href="/_users/logout">Sign out</a></p>
 
 % if(! ~ $"article_metadata '')
 %    echo $"article_metadata
@@ -34,5 +35,5 @@
 </div>
 
 <div id="footer">
-% cat `{ get_lib_file footer.inc }
+% local_read `{ get_lib_file footer.inc }
 </div>
