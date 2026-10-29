@@ -1,8 +1,8 @@
 <h1>Site map</h1>
 
 %{
-tmpfile=/tmp/werc_sitemap_$pid.txt
-tmpfilex=/tmp/werc_sitemapx_$pid.txt
+tmpfile=$TMPDIR/werc_sitemap_$pid.txt
+tmpfilex=$TMPDIR/werc_sitemapx_$pid.txt
 saveddf=$dirfilter
 
 MON2NUM='s/Jan/01/; s/Feb/02/; s/Mar/03/; s/Apr/04/; s/May/05/; s/Jun/06/; s/Jul/07/; s/Aug/08/; s/Sep/09/; s/Oct/10/; s/Nov/11/; s/Dec/12/;'
@@ -23,6 +23,8 @@ fn listDir {
         echo '<ul class="sitemap-list">'
 
         for(i in `{ls -dF $d^*/ $d^*.md $d^*.html $d^*.txt >[2]/dev/null | sed $dirfilter}) {
+            if(! ~ $i */ && test -d $i/.)
+                i=$i^'/'
             desc=`{get_file_title $i}
             u=`{echo $i|sed 's!'$sitedir'!!; '$dirclean's!/index$!/!; '}
             if(! ~ $#desc 0 && ! ~ $desc '')
@@ -31,7 +33,7 @@ fn listDir {
             echo '<li><a href="'$u'">'^$"n^'</a>' $"desc '</li>' 
             echo $base_url^$u >> $tmpfile
             echo '<url><loc>'$base_url^$u'</loc><lastmod>'^`{get_mdate $i}^'</lastmod></url>' >> $tmpfilex
-            if(test -d $i)
+            if(test -d $i/.)
                 @{ listDir $i }
         }
         echo '</ul>'

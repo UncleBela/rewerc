@@ -3,7 +3,7 @@
 fn dprint { echo $* >[1=2] }
 fn dprintv { { for(v in $*) { echo -n $v^'#'^$#$v^'=' $$v '; '  }; echo } >[1=2] }
 fn echo {if(! ~ $1 -n || ! ~ $2 '') /bin/echo $*}
-fn escape_html { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' $* }
+fn escape_html { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' $* }
 
 fn http_redirect {
     if(~ $1 http://* https://*)
@@ -14,7 +14,6 @@ fn http_redirect {
         t=$"base_url^$"req_path^$1
     exec /bin/echo 'Status: '^$2^'
 Location: '^$t^'
-
 '
     exit
 }
@@ -22,35 +21,9 @@ fn perm_redirect { http_redirect $1 '301 Moved Permanantly' }
 fn post_redirect { http_redirect $1 '303 See Other' }
 
 
-# Note: should check if content type is application/x-www-form-urlencoded?
-# Should compare with http://www.shelldorado.com/scripts/cmds/urlgetopt.txt
-fn load_post_args {
-    if(~ $REQUEST_METHOD POST && ~ $#post_args 0) {
-        ifs='&
-'       for(pair in `{cat}) {
-            ifs='=' { pair=`{echo -n $pair} }
-            n='post_arg_'^`{echo $pair(1)|urldecode|tr -cd 'a-zA-Z0-9_'}
-            post_args=( $post_args $n )
-            ifs=() { $n=`{echo -n $pair(2)|urldecode|tr -d ''} }
-        }
-        pair=()
-    }
-    if not
-        status='No POST or post args already loaded'
-}
-# Status is () if at least one arg is found. DEPRECATED: access vars directly.
-fn get_post_args {
-    load_post_args
-    _status='No post arg matches'
-    for(n in $*) {
-        v=post_arg_$n
-        if(! ~ $#$v 0) {
-            $n=$$v
-            _status=()
-        }
-    }
-    status=$_status
-}
+# Read-only publishing never consumes a POST body.
+fn load_post_args { status='HTTP writes are unavailable in read-only mode' }
+fn get_post_args { status='HTTP writes are unavailable in read-only mode' }
 
 # This seems slightly improve performance, but might depend on httpd buffering behavior.
 fn awk_buffer {
@@ -152,26 +125,17 @@ fn url_encode {
 ' $* 
 }
 
-# Cookies
-fn set_cookie {
-    # TODO: should check input values more carefully
-    name=$1
-    val=$2
-    extraHttpHeaders=( $extraHttpHeaders 'Set-cookie: '^$"name^'='^$"val^'; path=/;' )
-}
-fn get_cookie {
-    ifs=';' { co=`{echo $HTTP_COOKIE} }
-
-    # XXX: we might be adding a trailing new line?
-    # The ' ?' is needed to deal with '; ' inter-cookie delimiter
-    { for(c in $co) echo $c } | sed -n 's/^ ?'$1'=//p' 
-}
+# Compatibility hooks: no accounts, cookies or sessions are used.
+fn set_cookie { status='Cookies are unavailable in read-only mode' }
+fn get_cookie { status='Cookies are unavailable in read-only mode' }
 
 
 fn static_file {
     echo -n 'Content-Type: '
     select_mime $1
     echo
+    if(~ $REQUEST_METHOD HEAD)
+        exit
     exec cat $1
 }
 

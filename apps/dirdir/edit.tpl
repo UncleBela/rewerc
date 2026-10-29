@@ -2,6 +2,7 @@
     <h1>Editing: <a href="%($req_path%)">%($req_path%)</a></h1>
     <br>
     <form action="" method="POST">
+% csrf_field
         <textarea name="edit_text" id="edit_text" cols="80" rows="43">%{
 # FIXME Extra trailing new lines get added to the content somehow, should avoid it.
             if(~ $#post_arg_edit_text 0 && test -f $dirdir_file)

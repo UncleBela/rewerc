@@ -1,0 +1,42 @@
+# Enable from a site or directory's _werc/config with conf_enable_mathjax.
+fn conf_enable_mathjax {
+    conf_enable_app mathjax
+}
+
+fn mathjax_init {
+    if(! ~ $formatter(1) mathjax_format) {
+        mathjax_formatter=$formatter
+        mathjax_native=()
+        if(~ $formatter(1) md2html) {
+            mathjax_formatter=($formatter --math)
+            mathjax_native=yes
+        }
+        if not if(~ $formatter(1) fltr_cache && ~ $formatter(2) md2html) {
+            # A distinct cache command keeps math-enabled and plain output apart.
+            mathjax_native_formatter=$formatter(2-)
+            mathjax_formatter=(fltr_cache mathjax_native_format)
+            mathjax_native=yes
+        }
+        formatter=(mathjax_format)
+        if(~ $#mathjax_url 0)
+            mathjax_url='https://cdn.jsdelivr.net/npm/mathjax@4.0.0/tex-chtml.js'
+        ifs='' { mathjax_headers=`{md2html --mathjax-headers $mathjax_url} }
+        extraHeaders=($extraHeaders $mathjax_headers)
+    }
+}
+
+fn mathjax_native_format {
+    $mathjax_native_formatter --math $*
+}
+
+fn mathjax_format {
+    if(~ $mathjax_native yes)
+        $mathjax_formatter $*
+    if not {
+        # Compatibility for the retained Perl parser and other formatters.
+        if(~ $#* 0)
+            perl apps/mathjax/filter.pl protect | $mathjax_formatter | perl apps/mathjax/filter.pl restore
+        if not
+            cat $* | perl apps/mathjax/filter.pl protect | $mathjax_formatter | perl apps/mathjax/filter.pl restore
+    }
+}

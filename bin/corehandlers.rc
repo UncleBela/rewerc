@@ -8,7 +8,8 @@ fn nav_tree {
     ls -F $sitedir/./$req_paths_list >[2]/dev/null \
         | { 
             sed $dirfilter'/\/[^_.\/][^\/]*(\.(md|txt|html)|\/)$/!d; s!^'$sitedir'!!; '$dirclean 
-            if(! ~ $#synth_paths 0) echo $synth_paths | tr ' ' $NEW_LINE 
+            if(! ~ $#synth_paths 0) echo $synth_paths | tr ' ' $NEW_LINE
+            if(! ~ $"werc_linked_dirs '') echo -n $"werc_linked_dirs
         } | sort -u | awk -F/ ' 
     function p(x, y, s) { for(i=0; i < x-y; i+=1) print s }
     BEGIN { lNF=2; print "<ul>" }
@@ -67,7 +68,7 @@ fn html_handler {
 fn txt_handler {
     # Note: Words are not broken, even if they are way beyond 82 chars long
     echo '<pre>'
-    sed 's/</\&lt;/g; s/>/\&gt;/g' < $1 | fmt -l 82 -j
+    escape_html < $1 | fmt -l 82 -j
     echo '</pre>'
 }
 
@@ -83,8 +84,9 @@ fn dir_listing_handler {
 
 fn notices_handler {
     for(type in notify_errors notify_notes notify_success)
-        for(n in $$type)
-            echo '<div class="'$type'"><b>'$"n'</b></div>'
+        for(n in $$type) {
+            echo -n '<div class="'$type'"><b>'; echo -n $"n | escape_html; echo '</b></div>'
+        }
 }
 
 fn setup_handlers {

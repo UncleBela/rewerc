@@ -92,46 +92,16 @@ fn get_post_list {
 }
 
 fn mkbpost {
-    bptext=$1
-    bpdate=$2
-    bptitle=$3
-    bpid=$4
-    _status=()
-    if(~ $"bptext '')
-        _status=($_status 'You need to provide a post body.')
-    if(! ~ $"bpdate [0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9])
-        _status=($_status 'Invalid date: '''^$"bpdate^'''') # XXX Should make semantic check.
-
-    if(~ $#_status 0) {
-        umask 002 # Let group write
-        if(! ~ $"bpid '')
-            bpid=`{echo -n '-'^$bpid | sed 's/'$forbidden_uri_chars'+/_/g; 1q'}
-        
-        ddir=$blagh_root^$bpdate^'/'
-        n=`{ls $ddir >[2]/dev/null |wc -l}
-        
-        mkdir -p $ddir/$"n^$"bpid/
-        {
-            if(! ~ $"bptitle '') {
-                echo $bptitle
-                echo '========================================='
-            }
-            # TODO: Enable metadata
-            #echo '* Posted:' `{date}
-            #if(! ~ $#logged_user 0)
-            #   echo '* Author: '$logged_user
-            echo 
-            echo $bptext
-        }> $ddir/$"n^$"bpid/index.md 
-
-        # Experimental support for http://pubsubhubbub.googlecode.com/
+    if(secure_write blog $blagh_root $conf_blog_editors) {
+        # Preserve the existing explicitly configured feed notification.
         if(! ~ $"conf_blog_pubsubdub_hub '') {
             ifs='' { p=`{echo $req_url|sed 's/new_post$/index.atom/'|url_encode } }
-            dprint hget -p 'hub.mode=publish&hub.url='^$"p $conf_blog_pubsubdub_hub
             hget -d -h -p 'hub.mode=publish&hub.url='^$"p $conf_blog_pubsubdub_hub >[1=2] &
         }
+        status=()
     }
-    status=$_status
+    if not
+        status='Could not save post. Check the date, identifier and content.'
 }
 
 fn strip_title_from_md_file {

@@ -1,4 +1,9 @@
+% if(~ $werc_readonly yes) {
+<p>Browse the manual pages directly; POST-based search is unavailable in read-only mode.</p>
+% }
+% if not {
 <form action="" method="POST">
+% csrf_field
 <fieldset>
     <input type="text" name="wman_search" value="%($"s%)" />
     <input type="submit" name="go" value="Feel Lucky" />
@@ -6,7 +11,7 @@
 
 % if(! ~ $"post_arg_wman_search '') {
 %   if(~ $"wman_search_results '') {
-        No matches found for <i>'%($post_arg_wman_search%)'</i>.
+        No matches found for <i>'%(`{echo -n $"post_arg_wman_search | escape_html}%)'</i>.
 %   }
 %   if not {
         <ul>
@@ -18,3 +23,4 @@
 </fieldset>
 </form>
 
+% }

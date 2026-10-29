@@ -1,0 +1,9 @@
+# Local installation; runtime writes stay inside this checkout.
+PLAN9=/opt/plan9
+plan9port=$PLAN9
+path=($plan9port/bin . ./bin ./bin/contrib /bin /usr/bin)
+TMPDIR=/home/anon/Projects/rewerc/sz-werc/var/tmp
+formatter=(md2html)
+rcargs=-I
+debug=()
+enabled_apps=()

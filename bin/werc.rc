@@ -34,8 +34,19 @@ for(a in $werc_apps)
     . ./$a/app.rc
 
 fn werc_exec_request {
-    site=$SERVER_NAME
-    base_url=http://$site:$SERVER_PORT
+    # Direct execution cannot bypass the native read-only request guard.
+    if(! ~ $werc_readonly yes || ! ~ $REQUEST_METHOD GET HEAD) {
+        echo 'Status: 405 Method Not Allowed'
+        echo 'Allow: GET, HEAD'
+        echo 'Content-Type: text/plain'
+        echo
+        if(! ~ $REQUEST_METHOD HEAD)
+            echo 'Read-only publishing requires the CGI launcher.'
+        exit
+    }
+    extraHttpHeaders=($extraHttpHeaders 'Cache-Control: no-store')
+    site=$werc_site
+    base_url=http://$SERVER_NAME:$SERVER_PORT
     sitedir=$sitesdir/$site
     master_template=`{get_lib_file default_master.tpl}
     current_date_time=`{date}
@@ -49,17 +60,11 @@ fn werc_exec_request {
     local_file=''
     ifs='/' { args=`{echo -n $req_path} }
 
-    # Preload post args for templates where cgi's stdin is not accessible
-    if(~ $REQUEST_METHOD POST) {
-        load_post_args
-        login_user
-    }
-
     if(~ $req_path */index)
         perm_redirect `{echo $req_path | sed 's,/index$,/,'}
 
     if(~ $local_path */) {
-        if(test -d $local_path)
+        if(test -d $local_path/.)
             local_path=$local_path^'index'
         # XXX: This redir might step on apps with synthetic dirs.
         if not if(ls `{basename -d $local_path}^* >/dev/null >[2]/dev/null)
@@ -67,7 +72,7 @@ fn werc_exec_request {
     }
     if not if(~ $req_path *'.' *',' *';' *':')
         perm_redirect `{echo $req_path | sed 's/[.,;:)]$//'}
-    if not if(test -d $local_path)
+    if not if(test -d $local_path/.)
         perm_redirect $req_path^'/'
 
     if(! ~ $#args 0)
@@ -81,7 +86,7 @@ fn werc_exec_request {
     for(i in $args) {
         conf_wd=$conf_wd^$i
         req_paths_list=($req_paths_list $conf_wd)
-        if(test -d $i) {
+        if(test -d $i/.) {
             conf_wd=$conf_wd'/'
             cd $i
             if(test -f _werc/config)
@@ -108,7 +113,7 @@ fn werc_exec_request {
 
 
     # Set Page title
-    if(! ~ $local_file '') {
+    if(! ~ $local_file '' && ! ~ $local_file *.md) {
         t=`{get_file_title $local_file}
         if(! ~ $"t '')
             pageTitle=$t
@@ -119,6 +124,8 @@ fn werc_exec_request {
         pageTitle=$"siteTitle' '$"siteSubTitle
 #    if not
 #        pageTitle=$"pageTitle' | '$"siteTitle' '$"siteSubTitle
+
+    load_page_metadata
 
     for(h in $extraHttpHeaders)
         echo $h

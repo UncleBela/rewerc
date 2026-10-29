@@ -1,0 +1,10 @@
+/var/
+/bin/contrib/md2html
+/bin/contrib/md2html.new
+/sites/localhost
+/bin/__pycache__
+
+/bin/contrib/werc-guard
+/bin/contrib/werc-guard.new
+
+/etc/APPROVED_DIRECTORIES

@@ -242,6 +242,9 @@ sub Markdown {
 	$text =~ s{\r\n}{\n}g; 	# DOS to Unix
 	$text =~ s{\r}{\n}g; 	# Mac to Unix
 
+	my $properties;
+	($text, $properties) = _FrontMatter($text);
+
 	# Make sure $text ends with a couple of newlines:
 	$text .= "\n\n";
 
@@ -264,7 +267,88 @@ sub Markdown {
 
 	$text = _UnescapeSpecialChars($text);
 
-	return $text . "\n";
+	return $properties . $text . "\n";
+}
+
+
+# A deliberately small front matter reader: flat properties and string lists.
+# Unsupported YAML is left intact rather than silently dropping author content.
+sub _PropertyScalar {
+    my $value = shift;
+    $value =~ s/^\s+|\s+$//g;
+    if ($value =~ /^'(.*)'$/s) {
+        $value = $1;
+        $value =~ s/''/'/g;
+    } elsif ($value =~ /^"(.*)"$/s) {
+        $value = $1;
+        $value =~ s/\\(["\\])/$1/g;
+    } else {
+        $value =~ s/\s+#.*$//;
+        return if $value =~ /^(?:[\[\]{}&*!|>"']|---$)/;
+    }
+    return $value;
+}
+
+sub _PropertyHTML {
+    my $value = shift;
+    my $link = $value =~ m{^https?://[^\s<>"']+$}i;
+    $value =~ s/&/&amp;/g;
+    $value =~ s/</&lt;/g;
+    $value =~ s/>/&gt;/g;
+    $value =~ s/"/&quot;/g;
+    return $link ? '<a href="'.$value.'">'.$value.'</a>' : $value;
+}
+
+sub _FrontMatter {
+    my $text = shift;
+    return ($text, '') unless $text =~ /\A(?:\xEF\xBB\xBF)?---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\z)/s;
+    my ($block, $end) = ($1, $+[0]);
+    my @properties;
+    for my $line (split /\n/, $block) {
+        next if $line =~ /^\s*(?:#.*)?$/;
+        if ($line =~ /^[ \t]+-\s+(.*)$/ && @properties) {
+            my $value = _PropertyScalar($1);
+            return ($text, '') unless defined $value;
+            push @{$properties[-1][1]}, $value;
+        } elsif ($line =~ /^([^\s:#][^:]*):[ \t]*(.*)$/) {
+            my ($key, $raw) = ($1, $2);
+            $key =~ s/\s+$//;
+            my @values;
+            if ($raw =~ /^\[(.*)\][ \t]*(?:#.*)?$/) {
+                my $list = $1;
+                while ($list =~ /\S/) {
+                    return ($text, '') unless $list =~ s/^\s*("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^,'"\[\]{}]+)\s*(?:,|$)//;
+                    my $value = _PropertyScalar($1);
+                    return ($text, '') unless defined $value;
+                    push @values, $value;
+                }
+            } else {
+                my $value = _PropertyScalar($raw);
+                return ($text, '') unless defined $value;
+                push @values, $value if length $value;
+            }
+            push @properties, [$key, \@values];
+        } else {
+            return ($text, '');
+        }
+    }
+    return ($text, '') unless @properties;
+    my $html = "<div class=\"markdown-properties\" role=\"group\" aria-label=\"Properties\">\n<dl>\n";
+    for my $property (@properties) {
+        my ($key, $values) = @$property;
+        my $tags = $key =~ /^(?:tags|tag)$/i;
+        $html .= '<div class="markdown-property"><dt>'._PropertyHTML($key).'</dt><dd>';
+        if (@$values) {
+            $html .= join ' ', map {
+                '<span class="'.($tags ? 'property-tag' : 'property-value').'">'._PropertyHTML($_).'</span>'
+            } @$values;
+        } else {
+            $html .= '<span class="property-empty" aria-label="Empty">&#8212;</span>';
+        }
+        $html .= "</dd></div>\n";
+    }
+    $html .= "</dl>\n</div>\n\n";
+    return (substr($text, $end), $html);
 }
 
 
@@ -437,6 +521,8 @@ sub _RunBlockGamut {
 
 	$text = _DoBlockQuotes($text);
 
+	$text = _DoTables(_HashHTMLBlocks($text));
+
 	# We already ran _HashHTMLBlocks() before, in Markdown(), but that
 	# was to escape raw HTML in the original Markdown source. This time,
 	# we're escaping the markup we've just created, so that we don't wrap
@@ -446,6 +532,85 @@ sub _RunBlockGamut {
 	$text = _FormParagraphs($text);
 
 	return $text;
+}
+
+
+
+# Pipe tables: split only on unescaped pipes outside inline code spans.
+sub _TableCells {
+    my $line = shift;
+    $line =~ s/^ +| +$//g;
+    my @cells = ('');
+    while (length $line) {
+        if ($line =~ s/\A(\\.)//s) {
+            $cells[-1] .= $1 eq '\\|' ? '&#124;' : $1;
+        } elsif ($line =~ s/\A((`+).*?(?<!`)\2(?!`))//s) {
+            $cells[-1] .= $1;
+        } elsif ($line =~ s/\A\|//) {
+            push @cells, '';
+        } else {
+            $cells[-1] .= substr($line, 0, 1, '');
+        }
+    }
+    return unless @cells > 1;
+    shift @cells if $cells[0] eq '';
+    pop @cells if @cells && $cells[-1] eq '';
+    for (@cells) { s/^ +| +$//g; }
+    return \@cells;
+}
+
+sub _TableRow {
+    my ($cells, $align, $tag) = @_;
+    my $html = '<tr>';
+    for my $i (0 .. $#$align) {
+        my $attr = $tag eq 'th' ? ' scope="col"' : '';
+        $attr .= ' style="text-align:'.$align->[$i].'"' if $align->[$i];
+        $html .= '<'.$tag.$attr.'>'._RunSpanGamut($cells->[$i] || '').'</'.$tag.'>';
+    }
+    return $html."</tr>\n";
+}
+
+sub _DoTables {
+    my @lines = split /\n/, shift, -1;
+    my $out = '';
+    for (my $i = 0; $i < @lines; ++$i) {
+        # Fenced code is left to the existing formatter, never read as a table.
+        if ($lines[$i] =~ /^ {0,3}(`{3,}|~{3,})/) {
+            my ($char, $count) = (substr($1, 0, 1), length $1);
+            $out .= $lines[$i++]."\n";
+            while ($i < @lines) {
+                my $line = $lines[$i++];
+                $out .= $line."\n";
+                last if $line =~ /^ {0,3}\Q$char\E{$count,} *$/;
+            }
+            --$i;
+            next;
+        }
+        my $head = $lines[$i] !~ /^ {4}/ ? _TableCells($lines[$i]) : undef;
+        my $rule = $i + 1 < @lines ? _TableCells($lines[$i + 1]) : undef;
+        if (!$head || !$rule || !@$head || @$head != @$rule
+            || grep { !/^:?-{3,}:?$/ } @$rule) {
+            $out .= $lines[$i]."\n";
+            next;
+        }
+        my @align = map { /^:.*:$/ ? 'center' : /:$/ ? 'right' : /^:/ ? 'left' : '' } @$rule;
+        my $html = "<div class=\"markdown-table\">\n<table>\n<thead>\n";
+        $html .= _TableRow($head, \@align, 'th')."</thead>\n<tbody>\n";
+        $i += 2;
+        while ($i < @lines && $lines[$i] !~ /^ {4}/) {
+            my $cells = _TableCells($lines[$i]);
+            last unless $cells;
+            $html .= _TableRow($cells, \@align, 'td');
+            ++$i;
+        }
+        --$i;
+        $html .= "</tbody>\n</table>\n</div>";
+        # Store rendered cells so later Markdown passes cannot reinterpret them.
+        my $key = md5_hex($html);
+        $g_html_blocks{$key} = $html;
+        $out .= "\n\n$key\n\n";
+    }
+    return $out;
 }
 
 

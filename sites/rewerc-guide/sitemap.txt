@@ -1,0 +1,4 @@
+http://localhost:8080/about
+http://localhost:8080/notes/
+http://localhost:8080/notes/first-note
+http://localhost:8080/notes/rewerc-utmutato

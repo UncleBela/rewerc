@@ -8,7 +8,7 @@ fn fltr_cache {
     shift
 
     if(~ $#* 0) {
-        tmpf=/tmp/fmttmp.$pid
+        tmpf=$TMPDIR/fmttmp.$pid
         f=$tmpf
         score=`{{tee $tmpf || exit 1} | sha1sum}
     }
@@ -24,7 +24,7 @@ fn fltr_cache {
             score=$score(1)
         }
     }
-    cachedir=/tmp/fltr_cache/$score
+    cachedir=$TMPDIR/fltr_cache/$score
     mkdir -p $cachedir >[2]/dev/null
 
     if(test -s $cachedir/$proc)

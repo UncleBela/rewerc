@@ -1,6 +1,8 @@
 fn conf_enable_wiki {
     enable_wiki=yes
-    wiki_editors_groups=$* 
+    wiki_editors_groups=$*
+    if(~ $#wiki_editors_groups 0)
+        wiki_editors_groups=wiki-editors
     conf_enable_app dirdir
 }
 
@@ -17,7 +19,7 @@ fn dirdir_init {
         if(~ 1 $#post_arg_dirdir_edit $#post_arg_dirdir_preview)
             handler_body_main=(tpl_handler `{get_lib_file dirdir/edit.tpl apps/dirdir/edit.tpl})
 
-        if not if(! ~ '' $"post_arg_dirdir_save $"post_arg_edit_text)
+        if not if(~ $#post_arg_dirdir_save 1)
             save_page
 
         if not if(~ $"handler_body_main  '' || {~ $REQUEST_METHOD GET && test -f $local_path.md})
@@ -26,15 +28,8 @@ fn dirdir_init {
 }
 
 fn save_page {
-    dirdir_verdir=$dirdir_dir/^`{date -n}^/
-    mkdir -p $dirdir_verdir
-    umask 002
-
-    # XXX Use a tmp file and  mv(1) to ensure updates are atomic?
-    echo $logged_user > $dirdir_verdir/author
-    echo $post_arg_edit_text > $dirdir_verdir/data 
-    echo $post_arg_edit_text > $dirdir_file
-
-    post_redirect $base_url^$req_path
-    #notify_notes='Saved <a href="'$"req_path'">'$"req_path'</a>!'
+    if(secure_write wiki $dirdir_file $wiki_editors_groups)
+        post_redirect $base_url^$req_path
+    if not
+        notify_errors='Could not save page.'
 }

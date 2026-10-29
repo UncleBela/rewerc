@@ -1,0 +1,5 @@
+siteTitle='rewerc guide'
+siteSubTitle='notes & math'
+sideBarNavTitle='Sidebar sites'
+meta_description='Powered by rewerc'
+conf_enable_mathjax
