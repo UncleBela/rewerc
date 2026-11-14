@@ -1,37 +1,78 @@
 #!/bin/rc
 
+# Cache pure filters in a private directory outside the served document tree.
+# Subshell scope keeps nested filters from overwriting each other's variables.
 fn fltr_cache {
-    a=()
-    tmpf=()
+    @{
+        proc=$1
+        shift
+        if(! ~ $cache_root /* || ~ $proc *[~a-zA-Z0-9_.-]* || ! ~ $#* 0 1 || ~ $1 */) {
+            $proc $*
+            exit $status
+        }
+        if(! test -d $cache_root)
+            mkdir -m 700 $cache_root >[2]/dev/null
+        if(! test -w $cache_root) {
+            $proc $*
+            exit $status
+        }
 
-    proc=$1
-    shift
-
-    if(~ $#* 0) {
-        tmpf=/tmp/fmttmp.$pid
-        f=$tmpf
-        score=`{{tee $tmpf || exit 1} | sha1sum}
-    }
-    if not {
+        work=$cache_root/work.$pid
+        have_work=no
+        fn cache_cleanup {
+            if(~ $have_work yes)
+                rm -rf $work
+        }
         f=$1
-        if(~ $f */) {
-            score=`{du -an $f | sha1sum || exit 1} # XXX using -n(bytes) instead of -t(lastmod) because sitemap proc touches files in tree.
-            a=$f
-            f=/dev/null
+        if(~ $#* 0) {
+            # Exclusive creation prevents following a pre-existing temporary
+            # file. Never remove a work directory we did not create.
+            if(! mkdir -m 700 $work >[2]/dev/null) {
+                $proc
+                exit $status
+            }
+            have_work=yes
+            f=$work/input
+            if(! cat > $f) {
+                result=$status
+                cache_cleanup
+                exit $result
+            }
         }
-        if not {
-            score=`{sha1sum $f || exit 1}
-            score=$score(1)
+        score=`{sha1sum $f}
+        if(! ~ $status '' || ~ $#score 0) {
+            $proc < $f
+            result=$status
+            cache_cleanup
+            exit $result
         }
+        cached=$cache_root/$proc.$score(1)
+        if(test -f $cached) {
+            cat $cached
+            result=$status
+            cache_cleanup
+            exit $result
+        }
+        if(~ $have_work no) {
+            if(! mkdir -m 700 $work >[2]/dev/null) {
+                $proc < $f
+                exit $status
+            }
+            have_work=yes
+        }
+        # Publish complete results only, including valid empty output.
+        $proc < $f > $work/output
+        result=$status
+        if(~ $result '') {
+            if(mv $work/output $cached)
+                cat $cached
+            if not
+                cat $work/output
+            result=$status
+        }
+        if not
+            cat $work/output
+        cache_cleanup
+        exit $result
     }
-    cachedir=/tmp/fltr_cache/$score
-    mkdir -p $cachedir >[2]/dev/null
-
-    if(test -s $cachedir/$proc)
-        cat $cachedir/$proc
-    if not
-        if($proc $a < $f | tee $cachedir/$pid)
-            mv $cachedir/$pid $cachedir/$proc
-
-    rm $tmpf $cachedir/$pid >[2]/dev/null &
 }

@@ -28,8 +28,12 @@ path=($plan9port/bin . ./bin ./bin/contrib /bin /usr/bin)
 #formatter=(md2html.awk)
 formatter=(fltr_cache markdown.pl)
 
+# Private formatter cache; an unavailable directory falls back to formatting.
+# See var/README for ownership and cache maintenance.
+cache_root=$werc_root/var/cache
+
 # Enable debugging, to disable set to ()
-debug=true
+debug=()
 
 # Globally enabled apps
 enabled_apps=( )

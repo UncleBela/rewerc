@@ -13,8 +13,16 @@ fn conf_enable_comments {
     conf_enable_app bridge
 }
 
+fn bridge_has_document {
+    found=no
+    for(ext in $comment_file_types)
+        if(test -f $local_path.$ext)
+            found=yes
+    ~ $found yes
+}
+
 fn bridge_init {
-    if(~ $#enable_comments 1 && ! ~ `{ls $local_path.$comment_file_types >[2]/dev/null|wc -l} 0) {
+    if(~ $#enable_comments 1 && bridge_has_document) {
 
         comments_dir=$sitedir$req_path'_werc/comments'
         if(~ $REQUEST_METHOD GET && test -d $comments_dir)

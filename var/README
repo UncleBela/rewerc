@@ -1,0 +1,12 @@
+Runtime data lives here, outside sites/ and pub/.
+
+The formatter cache defaults to var/cache. Werc creates it with mode 0700 if
+this directory is writable. Otherwise formatting works without caching.
+For a CGI deployment, create var/cache owned by the CGI user with mode 0700.
+Never put the cache in a shared writable directory or expose it through HTTP.
+Set cache_root=() in etc/initrc.local to disable it. Remove cached files after
+changing a formatter implementation or its options. Cache entries are derived
+only from file contents; timestamp-preserving edits are detected.
+
+Only pure filters are cached. Directory generators such as the sitemap run
+fresh because their output also depends on configuration and request context.
